@@ -1,0 +1,8 @@
+packages:
+  - 'apps/*'
+  - 'services/*'
+  - 'packages/*'
+onlyBuiltDependencies:
+  - electron
+allowBuilds:
+  electron: true

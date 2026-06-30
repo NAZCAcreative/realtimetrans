@@ -1,0 +1,9 @@
+{
+  "name": "livesub-api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": ".venv\\Scripts\\python -m uvicorn app.main:app --port 8012 --reload",
+    "test": ".venv\\Scripts\\python tests/test_websocket.py"
+  }
+}

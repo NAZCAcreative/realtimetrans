@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+*.tsbuildinfo
+
+# Logs
+*.log
+.api-*.log
+.api-*.err.log
+.renderer-*.log
+.renderer-*.err.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+
+# Misc
+*.tmp
+coverage/

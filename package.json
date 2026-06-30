@@ -1,0 +1,16 @@
+{
+  "name": "livesub-ai-monorepo",
+  "version": "1.0.0",
+  "description": "Real-time LiveSub AI system audio translation platform MVP",
+  "private": true,
+  "scripts": {
+    "dev:desktop": "pnpm --filter livesub-desktop dev",
+    "dev:server": "pnpm --filter livesub-api dev",
+    "dev": "concurrently -n desktop,server -c blue,green \"pnpm dev:desktop\" \"pnpm dev:server\"",
+    "build:desktop": "pnpm --filter livesub-desktop build",
+    "test:server": "pnpm --filter livesub-api test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
