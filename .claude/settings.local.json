@@ -57,7 +57,9 @@
       "Bash(grep -E \"^\\(A|M\\).*\\\\.pyc$\")",
       "Bash(git commit -q -m 'Real-time live translation: pipeline, providers, and UI overhaul *)",
       "Bash(git commit *)",
-      "Bash(xargs -I{} echo \".bkit 참조 {}건 \\(0이어야 함\\)\")"
+      "Bash(xargs -I{} echo \".bkit 참조 {}건 \\(0이어야 함\\)\")",
+      "Bash(xargs -I{} echo \"ghp_ 출현: {}건 \\(0이어야 함\\)\")",
+      "Bash(xargs -I{} echo \"미푸시 커밋: {}개\")"
     ]
   }
 }
