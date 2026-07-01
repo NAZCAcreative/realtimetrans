@@ -59,7 +59,9 @@
       "Bash(git commit *)",
       "Bash(xargs -I{} echo \".bkit 참조 {}건 \\(0이어야 함\\)\")",
       "Bash(xargs -I{} echo \"ghp_ 출현: {}건 \\(0이어야 함\\)\")",
-      "Bash(xargs -I{} echo \"미푸시 커밋: {}개\")"
+      "Bash(xargs -I{} echo \"미푸시 커밋: {}개\")",
+      "Bash(grep -vE \"__pycache__|\\\\.pyc$|\\\\.pid$|\\\\.bkit/|\\\\.env$\")",
+      "Bash(grep -E \"\\\\.env$|__pycache__|\\\\.pyc$\")"
     ]
   }
 }

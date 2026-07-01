@@ -77,8 +77,8 @@ async def websocket_audio_endpoint(
     source_language: str = Query("ko"),
     target_language: str = Query("en"),
     capture_segment_seconds: float = Query(0.75, gt=0.1, le=5.0),
-    force_finalize_seconds: float = Query(1.0, gt=0.3, le=8.0),
-    max_translate_buffer_seconds: float = Query(0.25, gt=0.05, le=3.0),
+    force_finalize_seconds: float = Query(2.0, gt=0.3, le=8.0),
+    max_translate_buffer_seconds: float = Query(0.9, gt=0.05, le=3.0),
     partial_translate_interval: float = Query(0.5, gt=0.2, le=5.0),
     max_translation_lag_seconds: float = Query(4.0, gt=1.0, le=20.0)
 ):

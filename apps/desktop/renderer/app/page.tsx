@@ -145,7 +145,18 @@ export default function Dashboard() {
   const [backendAvailable, setBackendAvailable] = useState(false);
   const [liveAudioNotice, setLiveAudioNotice] = useState("");
   const [livePartialTranslation, setLivePartialTranslation] = useState("");
+  const [recentTranslations, setRecentTranslations] = useState<{ id: string; text: string }[]>([]);
   const [logView, setLogView] = useState<"both" | "original" | "translation">("both");
+
+  // The live Translation shows a short rolling window of recent sentences (older
+  // ones dimmed) plus the in-progress one, so it reads as a real-time stream. Stable
+  // per-sentence keys let only newly added sentences fade in.
+  const translationLines: { key: string; text: string; isPartial: boolean }[] = [
+    ...recentTranslations
+      .slice(livePartialTranslation ? -2 : -3)
+      .map((t) => ({ key: t.id, text: t.text, isPartial: false })),
+    ...(livePartialTranslation ? [{ key: "partial", text: livePartialTranslation, isPartial: true }] : []),
+  ];
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -274,6 +285,13 @@ export default function Dashboard() {
       } else if (data.type === "translation.final") {
         setLiveAudioNotice("");
         setLivePartialTranslation("");
+        // Keep a short rolling window of finished sentences so the live Translation
+        // reads as a flowing stream, not a single flashing line.
+        if (data.translated_text?.trim()) {
+          setRecentTranslations((prev) =>
+            [...prev, { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, text: data.translated_text }].slice(-3)
+          );
+        }
         commitTranslation(data.source_text || "Live translation", data.translated_text);
         pushOverlay({
           type: "translation",
@@ -535,6 +553,7 @@ export default function Dashboard() {
     setStatusMessage("Stopped");
     setLiveAudioNotice("");
     setLivePartialTranslation("");
+    setRecentTranslations([]);
 
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -801,22 +820,33 @@ export default function Dashboard() {
                 <p className="font-display mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-accentPurple">
                   <span className="h-1 w-1 rounded-full bg-accentPurple" /> Translation
                 </p>
-                <p className="font-display min-h-[4.5rem] text-2xl font-extrabold leading-tight md:text-4xl">
-                  {livePartialTranslation ? (
-                    <span className="text-purple-100/85">
-                      {tailText(livePartialTranslation, 180)}
-                      <span className="ml-1 animate-pulse text-accentPurple">|</span>
-                    </span>
-                  ) : translatedText ? (
-                    <span className="text-white">{tailText(translatedText, 180)}</span>
+                <div className="font-display flex min-h-[5.5rem] flex-col justify-end gap-1.5 leading-tight">
+                  {translationLines.length > 0 ? (
+                    translationLines.map((line, i) => {
+                      const isCurrent = i === translationLines.length - 1;
+                      return (
+                        <p
+                          key={line.key}
+                          className={
+                            "animate-line-in break-keep whitespace-pre-wrap " +
+                            (isCurrent
+                              ? `text-2xl font-extrabold md:text-4xl ${line.isPartial ? "text-purple-100/90" : "text-white"}`
+                              : "text-lg font-semibold text-purple-200/40 md:text-xl")
+                          }
+                        >
+                          {tailText(line.text, 220)}
+                          {line.isPartial && <span className="ml-1 animate-pulse text-accentPurple">|</span>}
+                        </p>
+                      );
+                    })
                   ) : liveAudioNotice ? (
-                    <span className="text-xl font-medium text-gray-400 md:text-2xl">{liveAudioNotice}</span>
+                    <p className="text-xl font-medium text-gray-400 md:text-2xl">{liveAudioNotice}</p>
                   ) : isCapturing ? (
-                    <span className="text-xl font-medium italic text-gray-600 md:text-2xl">Waiting for speech...</span>
+                    <p className="text-xl font-medium italic text-gray-600 md:text-2xl">Waiting for speech...</p>
                   ) : (
-                    <span className="text-xl font-medium italic text-gray-600 md:text-2xl">No active capture.</span>
+                    <p className="text-xl font-medium italic text-gray-600 md:text-2xl">No active capture.</p>
                   )}
-                </p>
+                </div>
               </div>
             </div>
           </div>

@@ -40,8 +40,8 @@ class RealtimeTranslationPipeline:
         source_lang = session_config.get("source_language", "ko")
         target_lang = session_config.get("target_language", "en")
 
-        max_sentence_chars = int(session_config.get("max_sentence_chars", 42))
-        max_buffer_seconds = float(session_config.get("max_translate_buffer_seconds", 0.25))
+        max_sentence_chars = int(session_config.get("max_sentence_chars", 80))
+        max_buffer_seconds = float(session_config.get("max_translate_buffer_seconds", 0.9))
         translation_timeout = float(session_config.get("translation_timeout_seconds", 10.0))
         partial_interval = float(session_config.get("partial_translate_interval", 0.5))
         context_turns = int(session_config.get("context_turns", 3))
@@ -49,7 +49,7 @@ class RealtimeTranslationPipeline:
         max_translation_attempts = int(session_config.get("max_translation_attempts", 2))
         max_translation_lag_seconds = float(session_config.get("max_translation_lag_seconds", 4.0))
 
-        sentence_endings = (".", "!", "?", "\n", ",")
+        sentence_endings = (".", "!", "?", "\n", "。", "！", "？")
         provider_name = type(self.translation_provider).__name__.lower()
         partial_mode = str(session_config.get("partial_translation", "auto")).lower()
         partial_translation_enabled = (
@@ -69,8 +69,8 @@ class RealtimeTranslationPipeline:
         direct_partial_at = 0.0
         direct_last_final_text = ""
 
-        force_finalize_seconds = float(session_config.get("force_finalize_seconds", 1.0))
-        min_forced_chunk_chars = int(session_config.get("min_forced_chunk_chars", 14))
+        force_finalize_seconds = float(session_config.get("force_finalize_seconds", 2.0))
+        min_forced_chunk_chars = int(session_config.get("min_forced_chunk_chars", 24))
         turn_committed_chars = 0
         turn_commit_time = 0.0
 
