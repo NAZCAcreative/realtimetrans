@@ -1,6 +1,7 @@
-﻿import asyncio
+import asyncio
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -17,19 +18,19 @@ class LocalWhisperSTTProvider(STTProvider):
         if not self.device or not self.compute_type:
             self.device, self.compute_type = self._resolve_whisper_runtime()
         self.beam_size = int(os.getenv("LOCAL_WHISPER_BEAM_SIZE", "1"))
-        self.language = os.getenv("LOCAL_WHISPER_LANGUAGE", "") or None
-        # VAD was over-filtering quiet / non-clean speech, leaving every segment empty
-        # (the UI then hangs on "Transcribing..."). Make it tunable and less aggressive.
+        self.language = self._normalize_language(os.getenv("LOCAL_WHISPER_LANGUAGE", ""))
         self.vad_filter = os.getenv("LOCAL_WHISPER_VAD", "true").strip().lower() not in ("false", "0", "off")
         self.no_speech_threshold = float(os.getenv("LOCAL_WHISPER_NO_SPEECH_THRESHOLD", "0.45"))
 
+    def _normalize_language(self, language: str | None) -> str | None:
+        language = (language or "").strip().lower()
+        return None if language in ("", "auto") else language
+
+    def set_language(self, language: str | None) -> None:
+        self.language = self._normalize_language(language)
+
     def _resolve_whisper_runtime(self) -> tuple[str, str]:
-        try:
-            import ctranslate2
-            if ctranslate2.get_cuda_device_count() > 0:
-                return "cuda", "float16"
-        except Exception:
-            pass
+        # Default to CPU on Windows. Some machines report CUDA but miss cuBLAS DLLs.
         return "cpu", "int8"
 
     async def stream_transcribe(
@@ -43,13 +44,17 @@ class LocalWhisperSTTProvider(STTProvider):
                 continue
 
             segment_index += 1
-            text = (await asyncio.to_thread(self._transcribe_chunk, chunk)).strip()
-            if not text:
-                # Surface this instead of silently swallowing it, so the UI does not
-                # look frozen on "Transcribing..." when a segment has no speech.
+            if LocalWhisperSTTProvider._model is None:
                 yield {
                     "type": "status",
-                    "message": "No speech detected in the last segment — still listening...",
+                    "message": f"Loading Whisper model on {self.device}/{self.compute_type}...",
+                }
+            text, detected_language = await asyncio.to_thread(self._transcribe_chunk, chunk)
+            text = text.strip()
+            if not text:
+                yield {
+                    "type": "status",
+                    "message": "No speech detected in the last segment - still listening...",
                 }
                 continue
 
@@ -58,6 +63,7 @@ class LocalWhisperSTTProvider(STTProvider):
                 "text": text,
                 "start_ms": segment_index * 3500,
                 "end_ms": segment_index * 3500 + 3500,
+                "language": detected_language or self.language or "auto",
             }
 
     def _load_model(self):
@@ -92,7 +98,7 @@ class LocalWhisperSTTProvider(STTProvider):
         LocalWhisperSTTProvider._model = model
         return LocalWhisperSTTProvider._model
 
-    def _transcribe_chunk(self, chunk: bytes) -> str:
+    def _transcribe_chunk(self, chunk: bytes) -> tuple[str, str | None]:
         model = self._load_model()
         tmp_path = ""
 
@@ -102,15 +108,34 @@ class LocalWhisperSTTProvider(STTProvider):
                 tmp.write(chunk)
                 tmp_path = tmp.name
 
-            segments, _info = model.transcribe(
-                tmp_path,
-                language=None if self.language == "auto" else self.language,
-                beam_size=self.beam_size,
-                vad_filter=self.vad_filter,
-                condition_on_previous_text=False,
-                no_speech_threshold=self.no_speech_threshold,
-            )
-            return " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+            try:
+                segments, info = model.transcribe(
+                    tmp_path,
+                    language=self.language,
+                    beam_size=self.beam_size,
+                    vad_filter=self.vad_filter,
+                    condition_on_previous_text=False,
+                    no_speech_threshold=self.no_speech_threshold,
+                )
+            except Exception as exc:
+                if self.device != "cpu" and "cublas" in str(exc).lower():
+                    print(f"[Whisper] CUDA runtime failed ({exc!r}), retrying on CPU/int8")
+                    self.device = "cpu"
+                    self.compute_type = "int8"
+                    LocalWhisperSTTProvider._model = None
+                    model = self._load_model()
+                    segments, info = model.transcribe(
+                        tmp_path,
+                        language=self.language,
+                        beam_size=self.beam_size,
+                        vad_filter=self.vad_filter,
+                        condition_on_previous_text=False,
+                        no_speech_threshold=self.no_speech_threshold,
+                    )
+                else:
+                    raise
+            text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+            return text, getattr(info, "language", None)
         finally:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)
@@ -120,6 +145,11 @@ class LocalNLLBTranslationProvider(TranslationProvider):
     _tokenizer = None
     _model = None
     _device = None
+    # The NLLB model is a process-wide singleton and PyTorch inference on a shared
+    # model is NOT safe to run from multiple threads at once (concurrent sessions,
+    # or a session racing the startup pre-warm, would deadlock/hang). Serialize all
+    # inference and loading behind one lock so it stays reliable under concurrency.
+    _infer_lock = threading.Lock()
 
     LANG_CODES = {
         "auto": "eng_Latn",
@@ -182,23 +212,23 @@ class LocalNLLBTranslationProvider(TranslationProvider):
     def _translate(self, text: str, source_lang: str, target_lang: str) -> str:
         import torch
 
-        tokenizer, model, device = self._load_model()
-        src_code = self.LANG_CODES.get(source_lang, source_lang)
-        tgt_code = self.LANG_CODES.get(target_lang, target_lang)
+        # Serialize all inference/loading: one shared model, not thread-safe for
+        # concurrent generate() calls across sessions.
+        with LocalNLLBTranslationProvider._infer_lock:
+            tokenizer, model, device = self._load_model()
+            src_code = self.LANG_CODES.get(source_lang, source_lang)
+            tgt_code = self.LANG_CODES.get(target_lang, target_lang)
 
-        tokenizer.src_lang = src_code
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(device)
-        forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_code)
+            tokenizer.src_lang = src_code
+            inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(device)
+            forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_code)
 
-        with torch.no_grad():
-            output_tokens = model.generate(
-                **inputs,
-                forced_bos_token_id=forced_bos_token_id,
-                max_new_tokens=self.max_new_tokens,
-                num_beams=1,
-            )
+            with torch.no_grad():
+                output_tokens = model.generate(
+                    **inputs,
+                    forced_bos_token_id=forced_bos_token_id,
+                    max_new_tokens=self.max_new_tokens,
+                    num_beams=1,
+                )
 
-        return tokenizer.batch_decode(output_tokens, skip_special_tokens=True)[0].strip()
-
-
-
+            return tokenizer.batch_decode(output_tokens, skip_special_tokens=True)[0].strip()

@@ -1,11 +1,11 @@
-﻿import asyncio
+import asyncio
 import json
 import os
 import uuid
 from typing import AsyncGenerator
 from urllib import request, error
 
-from app.providers.base import STTProvider, TranslationProvider
+from app.providers.base import STTProvider, TranslationProvider, resolve_language_name
 
 
 class OpenAIChunkedSTTProvider(STTProvider):
@@ -13,6 +13,14 @@ class OpenAIChunkedSTTProvider(STTProvider):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self.model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
         self.prompt = os.getenv("OPENAI_TRANSCRIBE_PROMPT", "You are transcribing audio from a video, live stream, or media player.")
+        self.language = self._normalize_language(os.getenv("OPENAI_TRANSCRIBE_LANGUAGE", ""))
+
+    def _normalize_language(self, language: str | None) -> str | None:
+        language = (language or "").strip().lower()
+        return None if language in ("", "auto") else language
+
+    def set_language(self, language: str | None) -> None:
+        self.language = self._normalize_language(language)
 
     async def stream_transcribe(
         self,
@@ -24,6 +32,7 @@ class OpenAIChunkedSTTProvider(STTProvider):
                 "text": "OPENAI_API_KEY is not set. Add it before using live OpenAI transcription.",
                 "start_ms": 0,
                 "end_ms": 0,
+                "language": self.language or "auto",
             }
             return
 
@@ -43,6 +52,7 @@ class OpenAIChunkedSTTProvider(STTProvider):
                 "text": text,
                 "start_ms": segment_index * 4000,
                 "end_ms": segment_index * 4000 + 4000,
+                "language": self.language or "auto",
             }
 
     def _transcribe_chunk(self, chunk: bytes, segment_index: int) -> str:
@@ -52,6 +62,8 @@ class OpenAIChunkedSTTProvider(STTProvider):
             ("response_format", "json"),
             ("prompt", self.prompt),
         ]
+        if self.language:
+            fields.append(("language", self.language))
 
         body = bytearray()
         for name, value in fields:
@@ -104,20 +116,31 @@ class OpenAITranslationProvider(TranslationProvider):
         if not self.api_key:
             return "OPENAI_API_KEY is not set."
 
-        return await asyncio.to_thread(self._translate, text, source_lang, target_lang)
+        return await asyncio.to_thread(self._translate, text, source_lang, target_lang, context)
 
-    def _translate(self, text: str, source_lang: str, target_lang: str) -> str:
+    def _translate(self, text: str, source_lang: str, target_lang: str, context: list[str] | None = None) -> str:
+        target_name = resolve_language_name(target_lang)
+        source_name = resolve_language_name(source_lang)
+        system_content = (
+            f"You are a live interpreter translating speech into {target_name}. "
+            "Render it the way a fluent native speaker would naturally say it in conversation - "
+            "smooth and idiomatic, not word-for-word. Preserve the meaning, tone, register and "
+            "any names, numbers or technical terms. Keep it concise for a subtitle line. "
+            "Use the prior dialogue only to stay consistent (pronouns, dropped subjects, "
+            "terminology); do NOT translate or repeat it. Return ONLY the translation - no quotes, "
+            "labels, or notes."
+        )
+        user_content = ""
+        if context:
+            joined = "\n".join(context)
+            user_content += f"Prior dialogue (context, already translated):\n{joined}\n\n"
+        user_content += f"Now translate this {source_name} line into {target_name}:\n{text}"
+
         payload = {
             "model": self.model,
             "input": [
-                {
-                    "role": "system",
-                    "content": "Translate subtitles for live video. Return only the translated subtitle text. Keep names, numbers, and technical terms accurate.",
-                },
-                {
-                    "role": "user",
-                    "content": f"Translate from {source_lang} to {target_lang}:\n{text}",
-                },
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content},
             ],
         }
 

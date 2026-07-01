@@ -1,6 +1,5 @@
-﻿import asyncio
+import asyncio
 import io
-import time
 import wave
 
 import numpy as np
@@ -10,7 +9,8 @@ async def capture_system_audio_to_queue(
     audio_queue: asyncio.Queue,
     send_json_callback,
     sample_rate: int = 16000,
-    segment_seconds: float = 2.0,
+    segment_seconds: float = 0.75,
+    output_format: str = "wav",
 ):
     try:
         import soundcard as sc
@@ -27,38 +27,61 @@ async def capture_system_audio_to_queue(
 
     def capture_worker():
         speaker = sc.default_speaker()
-        frames_per_segment = int(sample_rate * segment_seconds)
-        silent_count = 0
+        streaming = output_format == "pcm16"
+        # Read in small blocks back-to-back so the loopback stream is drained
+        # continuously - no sleeps, no gaps, no dropped audio. Blocks are then
+        # accumulated into a segment of the requested length before dispatch.
+        block_frames = max(256, int(sample_rate * min(0.1, segment_seconds)))
+        segment_frames = max(block_frames, int(sample_rate * segment_seconds))
+        # Only used to avoid dispatching completely silent WAV segments to chunked
+        # STT APIs. Recording itself never pauses, so nothing is missed.
+        silence_threshold = 0.0012
 
-        with sc.get_microphone(id=str(speaker.name), include_loopback=True).recorder(samplerate=sample_rate, channels=1) as recorder:
-            while not stop_event.is_set():
-                data = recorder.record(numframes=frames_per_segment)
+        pending: list[np.ndarray] = []
+        pending_len = 0
 
-                if data is None or len(data) == 0:
-                    time.sleep(0.05)
-                    continue
-
-                mono = np.asarray(data, dtype=np.float32).reshape(-1)
-                if np.max(np.abs(mono)) < 0.002:
-                    # MediaFoundation loopback spins fast when no audio plays.
-                    # Backoff only during silence — audio processing stays unthrottled.
-                    silent_count += 1
-                    time.sleep(min(0.05 * silent_count, 0.5))
-                    continue
-
-                silent_count = 0
-
-                pcm = np.clip(mono, -1.0, 1.0)
-                pcm16 = (pcm * 32767).astype(np.int16)
-
+        def dispatch(segment: np.ndarray):
+            pcm = np.clip(segment, -1.0, 1.0)
+            pcm16 = (pcm * 32767).astype(np.int16)
+            if streaming:
+                audio_bytes = pcm16.tobytes()
+            else:
                 buffer = io.BytesIO()
                 with wave.open(buffer, "wb") as wav:
                     wav.setnchannels(1)
                     wav.setsampwidth(2)
                     wav.setframerate(sample_rate)
                     wav.writeframes(pcm16.tobytes())
+                audio_bytes = buffer.getvalue()
+            # Fire-and-forget: never block the capture loop on delivery.
+            asyncio.run_coroutine_threadsafe(audio_queue.put(audio_bytes), loop)
 
-                asyncio.run_coroutine_threadsafe(audio_queue.put(buffer.getvalue()), loop).result()
+        recorder = sc.get_microphone(id=str(speaker.name), include_loopback=True).recorder(
+            samplerate=sample_rate, channels=1, blocksize=block_frames
+        )
+        with recorder:
+            while not stop_event.is_set():
+                data = recorder.record(numframes=block_frames)
+                if data is None or len(data) == 0:
+                    continue
+
+                mono = np.asarray(data, dtype=np.float32).reshape(-1)
+                pending.append(mono)
+                pending_len += len(mono)
+
+                if pending_len < segment_frames:
+                    continue
+
+                segment = np.concatenate(pending)
+                pending = []
+                pending_len = 0
+
+                if streaming:
+                    # Streaming STT (Realtime / Gemini Live) does its own voice
+                    # activity detection - forward every segment for full fidelity.
+                    dispatch(segment)
+                elif np.max(np.abs(segment)) >= silence_threshold:
+                    dispatch(segment)
 
     task = asyncio.create_task(asyncio.to_thread(capture_worker))
 

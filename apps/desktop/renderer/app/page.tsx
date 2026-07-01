@@ -1,6 +1,6 @@
-﻿"use client";
+"use client";
 
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useSubtitleStore } from "../stores/subtitleStore";
 import {
   Activity,
@@ -9,16 +9,30 @@ import {
   Globe,
   History,
   Languages,
+  List,
   MonitorUp,
   Play,
+  RotateCcw,
   Sliders,
   Square,
   Trash2,
   Tv,
 } from "lucide-react";
 
-const API_PORT = 8012;
-const SEGMENT_MS = 3500;
+const API_HOST = process.env.NEXT_PUBLIC_API_HOST || "127.0.0.1:8012";
+const HTTP_API_BASE = `http://${API_HOST}`;
+const WS_API_BASE = `ws://${API_HOST}`;
+const SEGMENT_MS = 1000;
+
+// STT providers that receive a continuous raw-PCM stream (vs chunked WAV/webm),
+// mapped to their required input sample rate in Hz.
+const PCM_STREAMING_PROVIDERS: Record<string, number> = {
+  openai_realtime: 24000,
+  openai_realtime_translate: 24000,
+  gemini_live: 16000,
+};
+const isPcmStreaming = (provider: string) => provider in PCM_STREAMING_PROVIDERS;
+const pcmRate = (provider: string) => PCM_STREAMING_PROVIDERS[provider] ?? 16000;
 
 
 type CaptureStatus = "idle" | "selecting" | "capturing" | "error";
@@ -34,6 +48,52 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(blob);
   });
+}
+
+
+function downsampleBuffer(buffer: Float32Array, inputRate: number, outputRate: number) {
+  if (outputRate === inputRate) {
+    return buffer;
+  }
+
+  const ratio = inputRate / outputRate;
+  const length = Math.floor(buffer.length / ratio);
+  const result = new Float32Array(length);
+
+  for (let i = 0; i < length; i += 1) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(Math.floor((i + 1) * ratio), buffer.length);
+    let sum = 0;
+    for (let j = start; j < end; j += 1) {
+      sum += buffer[j];
+    }
+    result[i] = sum / Math.max(1, end - start);
+  }
+
+  return result;
+}
+
+function pcm16Base64(samples: Float32Array) {
+  const bytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(bytes.buffer);
+
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+  }
+
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  return btoa(binary);
+}
+// Keep the live Original readable: show only the tail so a long speaking turn
+// (Realtime/Live accumulate the whole turn as one growing partial) never balloons.
+function tailText(text: string, max = 160) {
+  return text.length > max ? "..." + text.slice(-max) : text;
 }
 
 function getRecorderMimeType() {
@@ -58,27 +118,46 @@ export default function Dashboard() {
     partialTranscript,
     finalTranscript,
     translatedText,
-    history,
+    sessions,
+    activeSessionId,
+    selectedSessionId,
+    resetOnNewCapture,
     setCapturing,
     setConnected,
     setProviders,
     setLanguages,
+    setResetOnNewCapture,
+    startSession,
+    selectSession,
     updatePartial,
     commitFinalTranscript,
     commitTranslation,
     clearHistory,
   } = useSubtitleStore();
 
+  const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? sessions[0] ?? null;
+  const sessionItems = selectedSession?.items ?? [];
+
   const [overlayActive, setOverlayActive] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>("idle");
   const [statusMessage, setStatusMessage] = useState("Ready");
   const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
+  const [backendAvailable, setBackendAvailable] = useState(false);
+  const [liveAudioNotice, setLiveAudioNotice] = useState("");
+  const [livePartialTranslation, setLivePartialTranslation] = useState("");
+  const [logView, setLogView] = useState<"both" | "original" | "translation">("both");
 
   const wsRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const segmentTimerRef = useRef<NodeJS.Timeout | null>(null);
   const activeRef = useRef(false);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const captureModeRef = useRef<CaptureMode>("window");
 
   const pushOverlay = (data: any) => {
     if (typeof window !== "undefined" && (window as any).electronAPI) {
@@ -86,18 +165,84 @@ export default function Dashboard() {
     }
   };
 
+  // Normalize provider selections that were persisted before an option was removed
+  // (e.g. Gemini translation, Local Whisper) so a stale value can't silently break.
+  useEffect(() => {
+    const validStt = ["openai_realtime_translate", "openai_realtime", "gemini_live"];
+    const validTrans = ["facebook_nllb", "openai", "gemini"];
+    const nextStt = validStt.includes(sttProvider) ? sttProvider : "openai_realtime_translate";
+    const nextTrans = validTrans.includes(translationProvider) ? translationProvider : "facebook_nllb";
+    if (nextStt !== sttProvider || nextTrans !== translationProvider) {
+      setProviders(nextStt, nextTrans);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const checkBackend = async () => {
+      try {
+        const response = await fetch(`${HTTP_API_BASE}/health`, { cache: "no-store" });
+        if (mounted) {
+          setBackendAvailable(response.ok);
+        }
+      } catch {
+        if (mounted) {
+          setBackendAvailable(false);
+        }
+      }
+    };
+
+    void checkBackend();
+    const interval = window.setInterval(checkBackend, 5000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+  const scheduleReconnect = () => {
+    // Only reconnect while the user still intends to be capturing.
+    if (!activeRef.current || reconnectTimerRef.current) {
+      return;
+    }
+    const attempt = reconnectAttemptsRef.current + 1;
+    reconnectAttemptsRef.current = attempt;
+    const delay = Math.min(1000 * 2 ** (attempt - 1), 5000);
+    const seconds = Math.max(1, Math.round(delay / 1000));
+    setCaptureStatus("capturing");
+    setStatusMessage(`Connection lost. Reconnecting in ${seconds}s (attempt ${attempt})...`);
+    setLiveAudioNotice(`Reconnecting in ${seconds}s...`);
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (activeRef.current) {
+        connectWebSocket(captureModeRef.current);
+      }
+    }, delay);
+  };
+
   const connectWebSocket = (mode: CaptureMode) => {
-    const wsUrl = `ws://127.0.0.1:${API_PORT}/ws/audio?stt_provider=${sttProvider}&translation_provider=${translationProvider}&source_language=${sourceLanguage}&target_language=${targetLanguage}`;
+    captureModeRef.current = mode;
+    const effectiveTranslationProvider = sttProvider === "openai_realtime_translate" ? "openai" : translationProvider;
+    const wsUrl = `${WS_API_BASE}/ws/audio?stt_provider=${sttProvider}&translation_provider=${effectiveTranslationProvider}&source_language=${sourceLanguage}&target_language=${targetLanguage}`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      reconnectAttemptsRef.current = 0;
       setConnected(true);
+      setBackendAvailable(true);
+      setCaptureStatus("capturing");
       if (mode === "system") {
         setStatusMessage("Capturing Windows system audio");
+        setLiveAudioNotice("Listening for system audio...");
         ws.send(JSON.stringify({ type: "capture.system.start" }));
       } else {
+        // Window/tab capture keeps streaming from the existing media stream;
+        // the running capture loop resumes sending to the new socket automatically.
         setStatusMessage("Recording selected tab/window audio");
+        setLiveAudioNotice("Recording selected source audio...");
       }
     };
 
@@ -105,46 +250,135 @@ export default function Dashboard() {
       const data = JSON.parse(event.data);
 
       if (data.type === "transcript.partial") {
+        setLiveAudioNotice("");
         updatePartial(data.text);
         pushOverlay({ type: "partial", text: data.text });
       } else if (data.type === "transcript.final") {
+        setLiveAudioNotice("");
         commitFinalTranscript(data.text);
         pushOverlay({ type: "final", text: data.text });
-      } else if (data.type === "translation.final") {
-        commitTranslation(data.source_text, data.translated_text);
+      } else if (data.type === "language.detected") {
+        // Backend auto-detected and pinned the source language; reflect it in the UI.
+        setLanguages(data.source_language, useSubtitleStore.getState().targetLanguage);
+        setStatusMessage(`Detected language: ${data.source_language}`);
+      } else if (data.type === "translation.partial") {
+        // Live preview while the person is still speaking.
+        setLiveAudioNotice("");
+        setLivePartialTranslation(data.translated_text);
         pushOverlay({
           type: "translation",
-          sourceText: data.source_text,
+          sourceText: data.source_text || "Live translation",
+          translatedText: data.translated_text,
+          partial: true,
+        });
+      } else if (data.type === "translation.final") {
+        setLiveAudioNotice("");
+        setLivePartialTranslation("");
+        commitTranslation(data.source_text || "Live translation", data.translated_text);
+        pushOverlay({
+          type: "translation",
+          sourceText: data.source_text || "Live translation",
           translatedText: data.translated_text,
         });
       } else if (data.type === "capture.status") {
-        setStatusMessage(data.message || "Working");
+        const message = data.message || "Working";
+        setStatusMessage(message);
+        setLiveAudioNotice(message);
+      } else if (data.type === "translation.error") {
+        // Transient translation failure (rate limit, blip). Session stays alive.
+        setStatusMessage(`Translation retry: ${data.message || "temporary error"}`);
       } else if (data.type === "error") {
+        const message = data.message || "Transcription error";
         setCaptureStatus("error");
-        setStatusMessage(data.message || "Transcription error");
+        setStatusMessage(message);
+        setLiveAudioNotice(message);
       }
     };
 
     ws.onclose = () => {
       setConnected(false);
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       if (activeRef.current) {
-        setCaptureStatus("error");
-        setStatusMessage("Backend connection closed");
+        // Unexpected drop while the user is still capturing -> auto-reconnect.
+        scheduleReconnect();
       }
     };
 
     ws.onerror = () => {
-      setCaptureStatus("error");
-      setStatusMessage("Backend connection failed");
+      setBackendAvailable(false);
+      // onclose fires right after and handles reconnect; only surface a hard
+      // error when the user is not actively capturing.
+      if (!activeRef.current) {
+        setCaptureStatus("error");
+        setStatusMessage("Backend connection failed");
+        setLiveAudioNotice("Backend connection failed");
+      }
     };
   };
 
+
+  const sendPcmFrame = (base64Audio: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    ws.send(JSON.stringify({
+      type: "audio.chunk",
+      audio_base64: base64Audio,
+      mime_type: `audio/pcm;rate=${pcmRate(sttProvider)}`,
+    }));
+  };
+
+  const stopPcmStreaming = () => {
+    audioProcessorRef.current?.disconnect();
+    audioProcessorRef.current = null;
+    audioSourceRef.current?.disconnect();
+    audioSourceRef.current = null;
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+  };
+
+  const startPcmStreaming = (stream: MediaStream) => {
+    stopPcmStreaming();
+
+    const AudioContextConstructor = window.AudioContext || (window as any).webkitAudioContext;
+    const audioContext = new AudioContextConstructor();
+    const source = audioContext.createMediaStreamSource(stream);
+    const processor = audioContext.createScriptProcessor(1024, 1, 1);
+
+    processor.onaudioprocess = (event) => {
+      if (!activeRef.current) {
+        return;
+      }
+
+      const input = event.inputBuffer.getChannelData(0);
+      const downsampled = downsampleBuffer(input, audioContext.sampleRate, pcmRate(sttProvider));
+      sendPcmFrame(pcm16Base64(downsampled));
+    };
+
+    const silentGain = audioContext.createGain();
+    silentGain.gain.value = 0;
+    source.connect(processor);
+    processor.connect(silentGain);
+    silentGain.connect(audioContext.destination);
+
+    audioContextRef.current = audioContext;
+    audioSourceRef.current = source;
+    audioProcessorRef.current = processor;
+
+    setStatusMessage(`Streaming PCM audio to ${sttProvider === "gemini_live" ? "Gemini Live" : sttProvider === "openai_realtime_translate" ? "OpenAI Realtime Translate" : "OpenAI Realtime"}`);
+    setLiveAudioNotice("Streaming live audio...");
+  };
   const sendBlob = async (blob: Blob) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || blob.size < 1024) {
       return;
     }
 
+    setLiveAudioNotice(`Sending ${Math.max(1, Math.round(blob.size / 1024))} KB audio segment...`);
     const audioBase64 = await blobToBase64(blob);
     ws.send(JSON.stringify({
       type: "audio.chunk",
@@ -198,7 +432,11 @@ export default function Dashboard() {
       const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
       void sendBlob(blob).finally(() => {
         if (activeRef.current && stream.getAudioTracks().some((track) => track.readyState === "live")) {
-          recordNextSegment(stream);
+          if (isPcmStreaming(sttProvider)) {
+            startPcmStreaming(stream);
+          } else {
+            recordNextSegment(stream);
+          }
         }
       });
     };
@@ -206,6 +444,7 @@ export default function Dashboard() {
     try {
       recorder.start(SEGMENT_MS);
       setStatusMessage("Recording selected source audio segment");
+      setLiveAudioNotice("Recording selected source audio...");
       segmentTimerRef.current = setTimeout(() => {
         if (recorder.state === "recording") {
           recorder.stop();
@@ -223,6 +462,7 @@ export default function Dashboard() {
     setCapturing(true);
     setCaptureStatus("capturing");
     setStatusMessage("Connecting to backend system audio capture");
+    startSession();
     connectWebSocket("system");
   };
 
@@ -264,8 +504,13 @@ export default function Dashboard() {
       activeRef.current = true;
       setCapturing(true);
       setCaptureStatus("capturing");
+      startSession();
       connectWebSocket("window");
-      recordNextSegment(stream);
+      if (isPcmStreaming(sttProvider)) {
+        startPcmStreaming(stream);
+      } else {
+        recordNextSegment(stream);
+      }
     } catch (error) {
       activeRef.current = false;
       setCapturing(false);
@@ -288,11 +533,21 @@ export default function Dashboard() {
     setCapturing(false);
     setCaptureStatus("idle");
     setStatusMessage("Stopped");
+    setLiveAudioNotice("");
+    setLivePartialTranslation("");
+
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptsRef.current = 0;
 
     if (segmentTimerRef.current) {
       clearTimeout(segmentTimerRef.current);
       segmentTimerRef.current = null;
     }
+
+    stopPcmStreaming();
 
     if (recorderRef.current && recorderRef.current.state === "recording") {
       recorderRef.current.stop();
@@ -322,15 +577,19 @@ export default function Dashboard() {
   };
 
   const handleToggleOverlay = () => {
+    const hasElectron = typeof window !== "undefined" && (window as any).electronAPI;
+    if (!hasElectron) {
+      // The always-on-top overlay window only exists in the desktop (Electron) app.
+      setStatusMessage("Overlay is only available in the desktop app (run: pnpm dev:desktop). It does nothing in a browser.");
+      return;
+    }
     const nextState = !overlayActive;
     setOverlayActive(nextState);
-    if (typeof window !== "undefined" && (window as any).electronAPI) {
-      (window as any).electronAPI.toggleOverlay(nextState);
-    }
+    (window as any).electronAPI.toggleOverlay(nextState);
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-darkBg text-gray-100">
+    <div className="flex h-screen flex-col overflow-hidden bg-darkBg text-gray-100">
       <header className="glass flex items-center justify-between border-b border-darkBorder px-8 py-5">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accentBlue shadow-lg shadow-accentBlue/20">
@@ -344,9 +603,9 @@ export default function Dashboard() {
 
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 rounded-full border border-darkBorder bg-darkCard px-3 py-1.5 text-xs">
-            <span className={`h-2 w-2 rounded-full ${isConnected ? "bg-accentGreen" : "bg-red-500"}`} />
+            <span className={`h-2 w-2 rounded-full ${isConnected || backendAvailable ? "bg-accentGreen" : "bg-red-500"}`} />
             <span className="text-gray-400">Server</span>
-            <span className="font-semibold">{isConnected ? "Connected" : isCapturing ? "Connecting" : "Idle"}</span>
+            <span className="font-semibold">{isConnected ? "Connected" : backendAvailable ? "Ready" : isCapturing ? "Connecting" : "Offline"}</span>
           </div>
           <div className="flex items-center gap-2 rounded-full border border-darkBorder bg-darkCard px-3 py-1.5 text-xs">
             <Activity className="h-3.5 w-3.5 text-accentPurple" />
@@ -355,8 +614,8 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="grid flex-1 grid-cols-1 gap-6 p-8 lg:grid-cols-4">
-        <section className="flex flex-col gap-6 lg:col-span-1">
+      <main className="grid min-h-0 flex-1 grid-cols-1 gap-6 overflow-y-auto p-8 lg:grid-cols-4 lg:grid-rows-1 lg:overflow-hidden">
+        <section className="flex min-h-0 flex-col gap-6 overflow-y-auto pr-1 lg:col-span-1">
           <div className="glass-interactive flex flex-col gap-6 rounded-lg bg-darkCard/30 p-6">
             <h2 className="font-display flex items-center gap-2 text-sm font-semibold tracking-wider text-accentPurple">
               <Sliders className="h-4 w-4" /> ENGINE
@@ -370,9 +629,9 @@ export default function Dashboard() {
                 onChange={(e) => setProviders(e.target.value, translationProvider)}
                 className="w-full rounded-lg border border-darkBorder bg-darkBg px-3 py-2 text-sm text-gray-200 outline-none transition focus:border-accentPurple disabled:opacity-50"
               >
-                <option value="local_whisper">Local Whisper large-v3-turbo</option>
-                <option value="openai">OpenAI API</option>
-                <option value="mock">Mock demo</option>
+                <option value="openai_realtime_translate">OpenAI Realtime Translate (stable)</option>
+                <option value="openai_realtime">OpenAI Realtime Whisper</option>
+                <option value="gemini_live">Gemini Live API</option>
               </select>
             </div>
 
@@ -386,7 +645,7 @@ export default function Dashboard() {
               >
                 <option value="facebook_nllb">Facebook NLLB distilled 600M</option>
                 <option value="openai">OpenAI API</option>
-                <option value="mock">Mock Korean</option>
+                <option value="gemini">Gemini API</option>
               </select>
             </div>
 
@@ -429,10 +688,10 @@ export default function Dashboard() {
                   onChange={(e) => setLanguages(e.target.value, targetLanguage)}
                   className="w-full rounded-lg border border-darkBorder bg-darkBg px-3 py-2 text-sm text-gray-200 outline-none focus:border-accentBlue disabled:opacity-50"
                 >
-                  <option value="en">English</option>
+                  <option value="auto">Auto Detect</option>
                   <option value="ko">Korean</option>
+                  <option value="en">English</option>
                   <option value="ja">Japanese</option>
-                  <option value="auto">Auto</option>
                 </select>
               </div>
 
@@ -451,6 +710,22 @@ export default function Dashboard() {
                   <option value="ja">Japanese</option>
                 </select>
               </div>
+            </div>
+
+            <div className="flex items-center justify-between border-t border-darkBorder/50 pt-4">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
+                <RotateCcw className="h-3 w-3 text-accentBlue" /> Reset log on new capture
+              </label>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={resetOnNewCapture}
+                disabled={isCapturing}
+                onClick={() => setResetOnNewCapture(!resetOnNewCapture)}
+                className={`relative h-5 w-9 shrink-0 rounded-full transition disabled:opacity-50 ${resetOnNewCapture ? "bg-accentBlue" : "bg-darkBorder"}`}
+              >
+                <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${resetOnNewCapture ? "left-4" : "left-0.5"}`} />
+              </button>
             </div>
           </div>
 
@@ -488,66 +763,175 @@ export default function Dashboard() {
           </div>
         </section>
 
-        <section className="flex flex-col gap-6 lg:col-span-3">
-          <div className="glass relative flex min-h-[360px] flex-1 flex-col justify-end overflow-hidden rounded-lg border border-darkBorder bg-darkCard/25 p-8">
-            <div className="absolute left-6 top-6 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-accentPurple">
-              <Activity className="h-3.5 w-3.5" /> Live Output
+        <section className="flex min-h-0 flex-col gap-6 lg:col-span-2">
+          <div className="glass relative flex min-h-[280px] flex-none flex-col overflow-hidden rounded-2xl border border-darkBorder bg-gradient-to-b from-darkCard/40 to-darkCard/10 p-7">
+            <div className="mb-5 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-accentPurple">
+                <Activity className="h-3.5 w-3.5" /> Live Output
+              </div>
+              {isCapturing ? (
+                <span className="flex items-center gap-1.5 rounded-full bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-red-400">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> LIVE
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 rounded-full bg-darkCard px-2.5 py-1 text-[11px] font-semibold tracking-wide text-gray-500">
+                  <span className="h-1.5 w-1.5 rounded-full bg-gray-600" /> IDLE
+                </span>
+              )}
             </div>
 
-            <div className="z-10 flex max-w-full select-text flex-col gap-6">
-              <div className="min-h-[76px]">
-                <p className="font-display mb-1 text-xs font-semibold uppercase tracking-wider text-accentBlue">Original</p>
-                <p className="font-sans text-xl font-medium leading-relaxed text-gray-100 md:text-2xl">
+            <div className="z-10 flex flex-1 select-text flex-col justify-center gap-4">
+              <div className="rounded-xl border border-darkBorder/50 bg-darkBg/30 px-5 py-3">
+                <p className="font-display mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-accentBlue">
+                  <span className="h-1 w-1 rounded-full bg-accentBlue" /> Original
+                </p>
+                <p className="font-sans text-lg font-semibold leading-relaxed text-gray-200 md:text-xl">
                   {finalTranscript || partialTranscript ? (
                     <>
-                      <span>{finalTranscript}</span>
-                      {partialTranscript && <span className="ml-2 animate-pulse text-gray-500">{partialTranscript}...</span>}
+                      <span>{tailText(finalTranscript, 120)}</span>
+                      {partialTranscript && <span className="ml-2 animate-pulse text-gray-400">{tailText(partialTranscript, 120)}...</span>}
                     </>
-                  ) : isCapturing ? (
-                    <span className="text-lg italic text-gray-600">Waiting for speech...</span>
                   ) : (
-                    <span className="text-lg italic text-gray-600">No active capture.</span>
+                    <span className="italic text-gray-600">Source transcript appears here.</span>
                   )}
                 </p>
               </div>
 
-              <div className="min-h-[96px] border-t border-darkBorder/60 pt-5">
-                <p className="font-display mb-1 text-xs font-semibold uppercase tracking-wider text-accentPurple">Translation</p>
-                <p className="font-display text-2xl font-bold leading-normal text-white md:text-3xl">
-                  {translatedText || <span className="text-xl font-normal italic text-gray-600">Translation will appear here.</span>}
+              <div className="rounded-xl border border-accentPurple/30 bg-black/35 px-6 py-6 shadow-lg shadow-accentPurple/5">
+                <p className="font-display mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-accentPurple">
+                  <span className="h-1 w-1 rounded-full bg-accentPurple" /> Translation
+                </p>
+                <p className="font-display min-h-[4.5rem] text-2xl font-extrabold leading-tight md:text-4xl">
+                  {livePartialTranslation ? (
+                    <span className="text-purple-100/85">
+                      {tailText(livePartialTranslation, 180)}
+                      <span className="ml-1 animate-pulse text-accentPurple">|</span>
+                    </span>
+                  ) : translatedText ? (
+                    <span className="text-white">{tailText(translatedText, 180)}</span>
+                  ) : liveAudioNotice ? (
+                    <span className="text-xl font-medium text-gray-400 md:text-2xl">{liveAudioNotice}</span>
+                  ) : isCapturing ? (
+                    <span className="text-xl font-medium italic text-gray-600 md:text-2xl">Waiting for speech...</span>
+                  ) : (
+                    <span className="text-xl font-medium italic text-gray-600 md:text-2xl">No active capture.</span>
+                  )}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="glass flex max-h-[300px] flex-col gap-4 rounded-lg border border-darkBorder bg-darkCard/20 p-6">
-            <div className="flex items-center justify-between">
-              <h3 className="font-display flex items-center gap-2 text-sm font-semibold tracking-wider text-gray-400">
-                <History className="h-4 w-4 text-accentBlue" /> CAPTION HISTORY
+          <div className="glass flex min-h-0 flex-1 flex-col gap-4 rounded-2xl border border-darkBorder bg-darkCard/20 p-6">
+            <div className="flex items-center justify-between border-b border-darkBorder/50 pb-3">
+              <h3 className="font-display flex items-center gap-2 text-sm font-semibold tracking-wider text-gray-300">
+                <History className="h-4 w-4 text-accentBlue" /> CAPTION LOG
+                {selectedSession && (
+                  <span className="ml-1 truncate rounded-full bg-darkBorder/60 px-2 py-0.5 text-[10px] font-medium text-gray-400">
+                    {selectedSession.label} - {sessionItems.length}
+                  </span>
+                )}
               </h3>
               <button
                 onClick={clearHistory}
-                disabled={history.length === 0}
+                disabled={sessions.length === 0}
                 className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-red-400 disabled:opacity-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Clear all
+              </button>
+            </div>
+
+            <div className="flex gap-1 rounded-lg bg-darkBg/40 p-1 text-xs">
+              {([["both", "Both"], ["original", "Original"], ["translation", "Translation"]] as const).map(([v, label]) => (
+                <button
+                  key={v}
+                  onClick={() => setLogView(v)}
+                  className={`flex-1 rounded-md px-3 py-1.5 font-medium transition ${
+                    logView === v ? "bg-accentPurple/25 text-purple-100" : "text-gray-500 hover:text-gray-300"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pr-3">
+              {sessionItems.length > 0 ? (
+                sessionItems.map((item) => (
+                  <article
+                    key={item.id}
+                    className="animate-fade-in mx-auto w-full max-w-3xl border-b border-darkBorder/40 py-4 last:border-0"
+                  >
+                    <div className="mb-2 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-gray-600">
+                      <FileText className="h-3 w-3" />
+                      <time>{new Date(item.timestamp).toLocaleTimeString()}</time>
+                    </div>
+                    {logView !== "translation" && (
+                      <p className="font-sans text-base leading-relaxed text-gray-300">{item.sourceText}</p>
+                    )}
+                    {logView !== "original" && (
+                      <p className={`font-display text-lg font-semibold leading-relaxed text-purple-200 ${logView === "both" ? "mt-1.5" : ""}`}>
+                        {item.translatedText}
+                      </p>
+                    )}
+                  </article>
+                ))
+              ) : (
+                <div className="flex flex-1 items-center justify-center py-8 text-xs text-gray-600">No captions yet.</div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <section className="flex min-h-0 flex-col gap-6 lg:col-span-1">
+          <div className="glass flex min-h-0 flex-1 flex-col gap-3 rounded-2xl border border-darkBorder bg-darkCard/20 p-5">
+            <div className="flex items-center gap-2 border-b border-darkBorder/50 pb-3 font-display text-sm font-semibold tracking-wider text-gray-300">
+              <List className="h-4 w-4 text-accentPurple" /> SESSIONS
+              {sessions.length > 0 && (
+                <span className="rounded-full bg-darkBorder/60 px-2 py-0.5 text-[10px] font-medium text-gray-500">{sessions.length}</span>
+              )}
+              <button
+                onClick={clearHistory}
+                disabled={sessions.length === 0 || isCapturing}
+                title="Clear all sessions"
+                className="ml-auto flex items-center gap-1 text-xs font-normal text-gray-500 transition hover:text-red-400 disabled:opacity-40"
               >
                 <Trash2 className="h-3.5 w-3.5" /> Clear
               </button>
             </div>
-
-            <div className="flex flex-1 flex-col gap-3.5 overflow-y-auto pr-2">
-              {history.length > 0 ? (
-                history.map((item) => (
-                  <div key={item.id} className="animate-fade-in flex flex-col gap-1.5 rounded-lg border border-darkBorder/40 bg-darkCard/60 p-3.5 transition hover:border-darkBorder">
-                    <div className="flex items-center justify-between text-[10px] text-gray-500">
-                      <span className="flex items-center gap-1"><FileText className="h-3 w-3" /> Segment</span>
-                      <span>{new Date(item.timestamp).toLocaleTimeString()}</span>
-                    </div>
-                    <p className="font-sans text-sm text-gray-400">{item.sourceText}</p>
-                    <p className="font-display text-sm font-semibold text-purple-300">{item.translatedText}</p>
-                  </div>
-                ))
+            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+              {sessions.length > 0 ? (
+                sessions.map((s) => {
+                  const isActive = s.id === activeSessionId && isCapturing;
+                  const isSelected = s.id === (selectedSession?.id ?? null);
+                  return (
+                    <button
+                      key={s.id}
+                      onClick={() => selectSession(s.id)}
+                      className={`flex flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition ${
+                        isSelected
+                          ? "border-accentPurple/60 bg-accentPurple/10"
+                          : "border-darkBorder/50 bg-darkBg/40 hover:border-darkBorder"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate font-display text-xs font-semibold text-gray-200">{s.label}</span>
+                        {isActive && (
+                          <span className="flex shrink-0 items-center gap-1 text-[9px] font-semibold text-red-400">
+                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> LIVE
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] text-gray-500">{s.items.length} captions</span>
+                      {s.items[0] && (
+                        <span className="truncate text-[11px] text-purple-300/80">{s.items[0].translatedText}</span>
+                      )}
+                    </button>
+                  );
+                })
               ) : (
-                <div className="flex flex-1 items-center justify-center py-8 text-xs text-gray-600">No captions yet.</div>
+                <div className="flex flex-1 items-center justify-center px-2 py-8 text-center text-xs leading-relaxed text-gray-600">
+                  Press play to start a capture session.
+                </div>
               )}
             </div>
           </div>
@@ -556,6 +940,9 @@ export default function Dashboard() {
     </div>
   );
 }
+
+
+
 
 
 

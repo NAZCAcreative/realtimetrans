@@ -9,12 +9,20 @@ out/
 .next/
 *.tsbuildinfo
 
-# Logs
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Logs & runtime
 *.log
 .api-*.log
 .api-*.err.log
 .renderer-*.log
 .renderer-*.err.log
+*.pid
 
 # Environment
 .env
@@ -28,3 +36,6 @@ Thumbs.db
 # Misc
 *.tmp
 coverage/
+
+# bkit tool runtime/state (may contain secrets in audit logs)
+.bkit/
