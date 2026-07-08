@@ -5,6 +5,7 @@ import os
 from typing import AsyncGenerator
 
 from app.providers.base import STTProvider, resolve_language_name
+from app.providers.asr_text import apply_asr_glossary, asr_prompt
 
 
 class OpenAIRealtimeSTTProvider(STTProvider):
@@ -12,7 +13,7 @@ class OpenAIRealtimeSTTProvider(STTProvider):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self.realtime_model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2")
         self.transcription_model = os.getenv("OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-realtime-whisper")
-        self.delay = os.getenv("OPENAI_REALTIME_TRANSCRIBE_DELAY", "minimal")
+        self.delay = os.getenv("OPENAI_REALTIME_TRANSCRIBE_DELAY", "medium")
         self.language = self._normalize_language(os.getenv("OPENAI_REALTIME_TRANSCRIBE_LANGUAGE", ""))
         self.commit_interval_ms = int(os.getenv("OPENAI_REALTIME_COMMIT_INTERVAL_MS", "750"))
 
@@ -53,6 +54,7 @@ class OpenAIRealtimeSTTProvider(STTProvider):
             transcription = {
                 "model": self.transcription_model,
                 "delay": self.delay,
+                "prompt": os.getenv("OPENAI_REALTIME_TRANSCRIBE_PROMPT", "").strip() or asr_prompt(self.language),
             }
             if self.language:
                 transcription["language"] = self.language
@@ -115,11 +117,11 @@ class OpenAIRealtimeSTTProvider(STTProvider):
                                 partial_text += delta
                                 await event_queue.put({
                                     "type": "partial",
-                                    "text": partial_text,
+                                    "text": apply_asr_glossary(partial_text, self.language),
                                     "language": self.language or "auto",
                                 })
                         elif event_type == "conversation.item.input_audio_transcription.completed":
-                            transcript = data.get("transcript", "").strip()
+                            transcript = apply_asr_glossary(data.get("transcript", "").strip(), self.language)
                             if transcript:
                                 partial_text = ""
                                 await event_queue.put({
@@ -185,10 +187,11 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
         target = resolve_language_name(self.target_language)
         source = resolve_language_name(self.source_language or "auto")
         return (
-            f"You are a professional live broadcast interpreter. Listen to the incoming {source} audio "
+            f"You are a senior film subtitle translator for Netflix, Apple TV+, and YouTube Live. Listen to the incoming {source} audio "
             f"and translate it into {target} subtitles. Return only the translated subtitle text. "
-            "Keep each update short, natural, and readable on screen. Do not add labels, quotes, notes, "
-            "or explanations. Preserve names, numbers, technical terms, and tone."
+            "Prefer meaning, context, readability, and speaker intent over literal word order. Use natural spoken phrasing, not machine translation. "
+            "Buffer short clauses mentally and output complete subtitle units when possible. Keep subtitles concise, maximum two lines, with line breaks only at semantic boundaries. "
+            "Preserve names, numbers, technical terms, tone, honorific level, and formality. Do not add labels, quotes, notes, or explanations."
         )
 
     def _extract_text(self, data: dict) -> str:
@@ -241,6 +244,7 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
                 "session": {
                     "type": "realtime",
                     "instructions": instructions,
+                    "output_modalities": ["text"],
                     "audio": {
                         "input": {
                             "format": {
@@ -258,11 +262,20 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
                 "message": f"OpenAI Realtime translation connected ({self.realtime_model}). Speak now...",
             }
 
+            response_pending = False
+            response_backlog = False
+
             async def request_translation_response():
+                nonlocal response_pending, response_backlog
+                if response_pending:
+                    # A response is already being generated; the next commit's audio is
+                    # still part of the conversation, so ask again once it finishes.
+                    response_backlog = True
+                    return
+                response_pending = True
                 await ws.send(json.dumps({
                     "type": "response.create",
                     "response": {
-                        "modalities": ["text"],
                         "instructions": instructions,
                     },
                 }))
@@ -290,6 +303,13 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
 
                 if buffered:
                     await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    await request_translation_response()
+
+            async def on_response_settled():
+                nonlocal response_pending, response_backlog
+                response_pending = False
+                if response_backlog:
+                    response_backlog = False
                     await request_translation_response()
 
             async def receiver():
@@ -330,12 +350,15 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
                                     "language": self.source_language or "auto",
                                     "target_language": self.target_language,
                                 })
+                            if event_type == "response.done":
+                                await on_response_settled()
                         elif event_type == "error":
                             error = data.get("error", {})
                             await event_queue.put({
                                 "type": "status",
                                 "message": error.get("message") or json.dumps(data, ensure_ascii=False),
                             })
+                            await on_response_settled()
                         elif event_type in {"session.created", "session.updated"}:
                             await event_queue.put({
                                 "type": "status",
@@ -347,14 +370,39 @@ class OpenAIRealtimeTranslateProvider(STTProvider):
             sender_task = asyncio.create_task(sender())
             receiver_task = asyncio.create_task(receiver())
 
+            drain_deadline: float | None = None
+            drain_timeout_seconds = 15.0
+
             try:
                 while True:
-                    event = await event_queue.get()
+                    if (
+                        sender_task.done()
+                        and event_queue.empty()
+                        and not response_pending
+                        and not response_backlog
+                    ):
+                        break
+
+                    timeout = None
+                    if sender_task.done():
+                        # All audio is sent; give the last in-flight response(s) a
+                        # bounded window to finish instead of dropping them.
+                        if drain_deadline is None:
+                            drain_deadline = asyncio.get_running_loop().time() + drain_timeout_seconds
+                        timeout = max(0.0, drain_deadline - asyncio.get_running_loop().time())
+
+                    try:
+                        event = (
+                            await asyncio.wait_for(event_queue.get(), timeout=timeout)
+                            if timeout is not None
+                            else await event_queue.get()
+                        )
+                    except asyncio.TimeoutError:
+                        break
+
                     if event is None:
                         break
                     yield event
-                    if sender_task.done() and event_queue.empty():
-                        break
             finally:
                 sender_task.cancel()
                 receiver_task.cancel()

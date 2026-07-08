@@ -48,6 +48,7 @@ interface SubtitleState {
 
   updatePartial: (text: string) => void;
   commitFinalTranscript: (text: string) => void;
+  clearLiveTranscript: () => void;
   commitTranslation: (sourceText: string, translatedText: string) => void;
   clearHistory: () => void;
 }
@@ -71,7 +72,7 @@ export const useSubtitleStore = create<SubtitleState>()(
   sttProvider: "openai_realtime_translate",
   translationProvider: "openai",
   sourceLanguage: "ko",
-  targetLanguage: "en",
+  targetLanguage: "ko",
 
   resetOnNewCapture: false,
 
@@ -114,7 +115,12 @@ export const useSubtitleStore = create<SubtitleState>()(
 
   commitFinalTranscript: (text) => set({
     finalTranscript: text,
-    partialTranscript: "", // clear partial
+    partialTranscript: "",
+  }),
+
+  clearLiveTranscript: () => set({
+    finalTranscript: "",
+    partialTranscript: "",
   }),
 
   commitTranslation: (sourceText, translatedText) => set((state) => {
@@ -183,10 +189,19 @@ export const useSubtitleStore = create<SubtitleState>()(
         targetLanguage: state.targetLanguage,
         resetOnNewCapture: state.resetOnNewCapture,
       }),
-      merge: (persisted, current) => ({
-        ...current,
-        ...(persisted as Partial<SubtitleState>),
-      }),
+      merge: (persisted, current) => {
+        const saved = persisted as Partial<SubtitleState> | undefined;
+        return {
+          ...current,
+          sessions: saved?.sessions ?? current.sessions,
+          selectedSessionId: saved?.selectedSessionId ?? current.selectedSessionId,
+          sttProvider: saved?.sttProvider ?? current.sttProvider,
+          translationProvider: saved?.translationProvider ?? current.translationProvider,
+          sourceLanguage: !saved?.sourceLanguage || saved.sourceLanguage === "auto" ? "ko" : saved.sourceLanguage,
+          targetLanguage: saved?.targetLanguage ?? current.targetLanguage,
+          resetOnNewCapture: saved?.resetOnNewCapture ?? current.resetOnNewCapture,
+        };
+      },
     }
   )
 );

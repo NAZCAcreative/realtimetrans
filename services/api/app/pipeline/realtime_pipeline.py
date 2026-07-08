@@ -40,12 +40,12 @@ class RealtimeTranslationPipeline:
         source_lang = session_config.get("source_language", "ko")
         target_lang = session_config.get("target_language", "en")
 
-        max_sentence_chars = int(session_config.get("max_sentence_chars", 80))
-        max_buffer_seconds = float(session_config.get("max_translate_buffer_seconds", 0.9))
+        max_sentence_chars = int(session_config.get("max_sentence_chars", 150))
+        max_buffer_seconds = float(session_config.get("max_translate_buffer_seconds", 1.1))
         translation_timeout = float(session_config.get("translation_timeout_seconds", 10.0))
         partial_interval = float(session_config.get("partial_translate_interval", 0.5))
-        context_turns = int(session_config.get("context_turns", 3))
-        coalesce_char_limit = int(session_config.get("coalesce_char_limit", 260))
+        context_turns = int(session_config.get("context_turns", 24))
+        coalesce_char_limit = int(session_config.get("coalesce_char_limit", 420))
         max_translation_attempts = int(session_config.get("max_translation_attempts", 2))
         max_translation_lag_seconds = float(session_config.get("max_translation_lag_seconds", 4.0))
 
@@ -69,8 +69,8 @@ class RealtimeTranslationPipeline:
         direct_partial_at = 0.0
         direct_last_final_text = ""
 
-        force_finalize_seconds = float(session_config.get("force_finalize_seconds", 2.0))
-        min_forced_chunk_chars = int(session_config.get("min_forced_chunk_chars", 24))
+        force_finalize_seconds = float(session_config.get("force_finalize_seconds", 2.8))
+        min_forced_chunk_chars = int(session_config.get("min_forced_chunk_chars", 42))
         turn_committed_chars = 0
         turn_commit_time = 0.0
 
@@ -104,7 +104,13 @@ class RealtimeTranslationPipeline:
                 return True
             if len(stripped) >= max_sentence_chars:
                 return True
-            return pending_started_at > 0 and (time.monotonic() - pending_started_at) >= max_buffer_seconds
+            if pending_started_at <= 0:
+                return False
+            age = time.monotonic() - pending_started_at
+            soft_boundary = stripped.endswith((",", ";", ":", "，", "、", "그리고", "근데", "그런데", "because", "but", "and"))
+            if soft_boundary and age < max_buffer_seconds * 1.25:
+                return False
+            return age >= max_buffer_seconds
 
         def queue_depth() -> int:
             return translation_queue.qsize()
@@ -408,12 +414,16 @@ class RealtimeTranslationPipeline:
                     latest_partial = (event["text"], event_source_lang)
                     if turn_commit_time <= 0:
                         turn_commit_time = time.monotonic()
-                    tail = event["text"][turn_committed_chars:].lstrip()
+                    # UI partials need enough left context to read like a sentence.
+                    # Keep translation/final cut tracking unchanged, but do not send
+                    # only the newest word-sized tail to the frontend.
+                    display_start = max(0, turn_committed_chars - 240)
+                    display_text = event["text"][display_start:].lstrip()
                     await send_json_callback({
                         "type": "transcript.partial",
                         "session_id": session_id,
                         "source_language": event_source_lang,
-                        "text": tail,
+                        "text": display_text,
                         "stability": event.get("stability", 0.8),
                         "timestamp_ms": event.get("timestamp_ms", 0)
                     })

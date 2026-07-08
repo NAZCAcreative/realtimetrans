@@ -33,9 +33,10 @@ async def capture_system_audio_to_queue(
         # accumulated into a segment of the requested length before dispatch.
         block_frames = max(256, int(sample_rate * min(0.1, segment_seconds)))
         segment_frames = max(block_frames, int(sample_rate * segment_seconds))
-        # Only used to avoid dispatching completely silent WAV segments to chunked
-        # STT APIs. Recording itself never pauses, so nothing is missed.
-        silence_threshold = 0.0012
+        # Avoid sending pure silence/noise to ASR. Realtime models can hallucinate
+        # text when fed long runs of low-level background audio.
+        silence_threshold = 0.0015
+        speech_hangover_segments = 0
 
         pending: list[np.ndarray] = []
         pending_len = 0
@@ -76,12 +77,15 @@ async def capture_system_audio_to_queue(
                 pending = []
                 pending_len = 0
 
-                if streaming:
-                    # Streaming STT (Realtime / Gemini Live) does its own voice
-                    # activity detection - forward every segment for full fidelity.
-                    dispatch(segment)
-                elif np.max(np.abs(segment)) >= silence_threshold:
-                    dispatch(segment)
+                peak = float(np.max(np.abs(segment))) if len(segment) else 0.0
+                if peak >= silence_threshold:
+                    speech_hangover_segments = 3
+                elif speech_hangover_segments > 0:
+                    speech_hangover_segments -= 1
+                else:
+                    continue
+
+                dispatch(segment)
 
     task = asyncio.create_task(asyncio.to_thread(capture_worker))
 

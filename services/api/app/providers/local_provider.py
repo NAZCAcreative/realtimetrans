@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from app.providers.base import STTProvider, TranslationProvider
+from app.providers.asr_text import apply_asr_glossary, asr_prompt
 
 
 class LocalWhisperSTTProvider(STTProvider):
@@ -21,6 +22,7 @@ class LocalWhisperSTTProvider(STTProvider):
         self.language = self._normalize_language(os.getenv("LOCAL_WHISPER_LANGUAGE", ""))
         self.vad_filter = os.getenv("LOCAL_WHISPER_VAD", "true").strip().lower() not in ("false", "0", "off")
         self.no_speech_threshold = float(os.getenv("LOCAL_WHISPER_NO_SPEECH_THRESHOLD", "0.45"))
+        self.initial_prompt_override = os.getenv("LOCAL_WHISPER_INITIAL_PROMPT", "").strip()
 
     def _normalize_language(self, language: str | None) -> str | None:
         language = (language or "").strip().lower()
@@ -115,6 +117,7 @@ class LocalWhisperSTTProvider(STTProvider):
                     beam_size=self.beam_size,
                     vad_filter=self.vad_filter,
                     condition_on_previous_text=False,
+                    initial_prompt=self.initial_prompt_override or asr_prompt(self.language),
                     no_speech_threshold=self.no_speech_threshold,
                 )
             except Exception as exc:
@@ -130,12 +133,14 @@ class LocalWhisperSTTProvider(STTProvider):
                         beam_size=self.beam_size,
                         vad_filter=self.vad_filter,
                         condition_on_previous_text=False,
+                        initial_prompt=self.initial_prompt_override or asr_prompt(self.language),
                         no_speech_threshold=self.no_speech_threshold,
                     )
                 else:
                     raise
             text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
-            return text, getattr(info, "language", None)
+            detected = getattr(info, "language", None)
+            return apply_asr_glossary(text, self.language or detected), detected
         finally:
             if tmp_path:
                 Path(tmp_path).unlink(missing_ok=True)

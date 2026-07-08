@@ -69,6 +69,20 @@ async def _prewarm_translation_model():
 def health_check():
     return {"status": "ok", "version": "1.0.0"}
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 @app.websocket("/ws/audio")
 async def websocket_audio_endpoint(
     websocket: WebSocket,
@@ -76,11 +90,12 @@ async def websocket_audio_endpoint(
     translation_provider: str = Query("local_nllb"),
     source_language: str = Query("ko"),
     target_language: str = Query("en"),
-    capture_segment_seconds: float = Query(0.75, gt=0.1, le=5.0),
-    force_finalize_seconds: float = Query(2.0, gt=0.3, le=8.0),
-    max_translate_buffer_seconds: float = Query(0.9, gt=0.05, le=3.0),
-    partial_translate_interval: float = Query(0.5, gt=0.2, le=5.0),
-    max_translation_lag_seconds: float = Query(4.0, gt=1.0, le=20.0)
+    capture_segment_seconds: float = Query(_env_float("RTVOICE_CAPTURE_SEGMENT_SECONDS", 0.75), gt=0.1, le=5.0),
+    force_finalize_seconds: float = Query(_env_float("RTVOICE_FORCE_FINALIZE_SECONDS", 2.0), gt=0.3, le=8.0),
+    min_forced_chunk_chars: int = Query(_env_int("RTVOICE_MIN_FORCED_CHUNK_CHARS", 24), ge=8, le=240),
+    max_translate_buffer_seconds: float = Query(_env_float("RTVOICE_MAX_TRANSLATE_BUFFER_SECONDS", 0.9), gt=0.05, le=3.0),
+    partial_translate_interval: float = Query(_env_float("RTVOICE_PARTIAL_TRANSLATE_INTERVAL", 0.5), gt=0.2, le=5.0),
+    max_translation_lag_seconds: float = Query(_env_float("RTVOICE_MAX_TRANSLATION_LAG_SECONDS", 4.0), gt=1.0, le=20.0)
 ):
     await websocket.accept()
     print(f"WebSocket client connected. STT={stt_provider}, Translation={translation_provider}")
@@ -91,6 +106,7 @@ async def websocket_audio_endpoint(
         "source_language": source_language,
         "target_language": target_language,
         "force_finalize_seconds": force_finalize_seconds,
+        "min_forced_chunk_chars": min_forced_chunk_chars,
         "max_translate_buffer_seconds": max_translate_buffer_seconds,
         "partial_translate_interval": partial_translate_interval,
         "max_translation_lag_seconds": max_translation_lag_seconds,

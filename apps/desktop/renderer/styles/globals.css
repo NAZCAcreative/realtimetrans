@@ -80,3 +80,156 @@
   border-color: rgba(138, 43, 226, 0.3);
   box-shadow: 0 0 20px rgba(138, 43, 226, 0.1);
 }
+
+
+@layer components {
+  .panel-shell {
+    @apply rounded-[24px] border border-white/[0.08] bg-white/[0.035] shadow-2xl shadow-black/25 backdrop-blur-xl;
+  }
+
+  .chip {
+    @apply flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium;
+  }
+
+  .chip-success {
+    @apply border-accentGreen/20 bg-accentGreen/10 text-emerald-100;
+  }
+
+  .chip-purple {
+    @apply border-accentPurple/25 bg-accentPurple/10 text-purple-100;
+  }
+
+  .chip-warning {
+    @apply border-yellow-400/20 bg-yellow-400/10 text-yellow-100;
+  }
+
+  .control-select {
+    @apply w-full rounded-2xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm text-gray-200 outline-none transition focus:border-accentPurple disabled:opacity-50;
+  }
+
+  .capture-mode-button {
+    @apply min-h-[52px] rounded-2xl border px-2.5 py-2 text-xs font-medium leading-tight transition disabled:opacity-50;
+  }
+
+  .cinema-stage {
+    background:
+      radial-gradient(circle at 50% 0%, rgba(138, 43, 226, 0.14), transparent 32%),
+      linear-gradient(180deg, rgba(21, 24, 36, 0.92), rgba(6, 7, 10, 0.96));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 28px 70px rgba(0, 0, 0, 0.35);
+  }
+
+  .subtitle-surface {
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0.72));
+    border: 1px solid rgba(255, 255, 255, 0.10);
+  }
+
+  .subtitle-live {
+    letter-spacing: 0;
+    text-wrap: balance;
+    text-shadow: 0 2px 18px rgba(0, 0, 0, 0.72), 0 1px 2px rgba(0, 0, 0, 0.9);
+  }
+
+  .script-card {
+    @apply rounded-2xl border border-white/[0.08] bg-black/20 shadow-lg shadow-black/10;
+  }
+}
+
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.055);
+  padding: 0.375rem 0.75rem;
+  font-size: 11px;
+  font-weight: 700;
+  color: rgb(209 213 219);
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.theme-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.09);
+  color: white;
+}
+
+.theme-light header {
+  border-color: rgba(15, 23, 42, 0.08);
+  background: rgba(248, 250, 252, 0.88);
+}
+
+.theme-light .theme-toggle,
+.theme-light .chip,
+.theme-light .rounded-full.border {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.74);
+  color: rgb(51 65 85);
+}
+
+.theme-light .panel-shell {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.08);
+}
+
+.theme-light .cinema-stage {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(138, 43, 226, 0.10), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(239, 242, 247, 0.94));
+  border-color: rgba(15, 23, 42, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.88), 0 28px 70px rgba(15, 23, 42, 0.10);
+}
+
+.theme-light .subtitle-surface {
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.96));
+  border-color: rgba(15, 23, 42, 0.22);
+}
+
+.theme-light .script-card {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.07);
+}
+
+.theme-light .control-select {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.82);
+  color: rgb(15 23 42);
+}
+
+.theme-light .capture-mode-button {
+  border-color: rgba(15, 23, 42, 0.10);
+  background: rgba(255, 255, 255, 0.68);
+  color: rgb(71 85 105);
+}
+
+.theme-light .text-white,
+.theme-light .text-gray-100,
+.theme-light .text-gray-200,
+.theme-light .text-gray-300 {
+  color: rgb(15 23 42);
+}
+
+.theme-light .text-gray-400,
+.theme-light .text-gray-500,
+.theme-light .text-gray-600 {
+  color: rgb(100 116 139);
+}
+
+.theme-light .subtitle-surface .text-white,
+.theme-light .subtitle-surface .text-gray-400,
+.theme-light .subtitle-surface .text-gray-500,
+.theme-light .subtitle-surface .text-gray-600,
+.theme-light .subtitle-surface .text-purple-100\/90 {
+  color: white;
+}
+
+.theme-light .bg-darkCard,
+.theme-light .bg-darkCard\/60,
+.theme-light .bg-darkBorder\/60,
+.theme-light .bg-black\/20 {
+  background-color: rgba(255, 255, 255, 0.62);
+}

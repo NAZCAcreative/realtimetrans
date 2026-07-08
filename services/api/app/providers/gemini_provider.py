@@ -8,6 +8,7 @@ from typing import AsyncGenerator
 from urllib import parse, request, error
 
 from app.providers.base import STTProvider, TranslationProvider, resolve_language_name
+from app.providers.asr_text import asr_prompt
 
 
 class GeminiLiveSTTProvider(STTProvider):
@@ -224,7 +225,7 @@ class GeminiSTTProvider(STTProvider):
         mime_type = "audio/wav" if chunk[:4] == b"RIFF" else "audio/webm"
         lang_hint = f" The spoken language is {resolve_language_name(self.language)}." if self.language else ""
         prompt = (
-            "Transcribe the following audio to text exactly as spoken." + lang_hint +
+            asr_prompt(self.language) + lang_hint +
             " Return only the transcript with no extra commentary, labels, or quotation marks."
             " If there is no intelligible speech, return an empty response."
         )
@@ -325,14 +326,16 @@ class GeminiTranslationProvider(TranslationProvider):
             "systemInstruction": {
                 "parts": [{
                     "text": (
-                        "Translate live subtitles. Return only the translated subtitle text. "
-                        "Preserve names, numbers, code terms, and timing-friendly short phrasing."
+                        "Translate live subtitles like a senior film subtitle translator. Return only the translated subtitle text. "
+                        "Prefer meaning, context, readability, and speaker intent over literal word order. "
+                        "Keep output concise, natural, and at most two lines with line breaks only at semantic boundaries. "
+                        "Preserve names, numbers, code terms, tone, honorific level, and formality."
                     )
                 }]
             },
             "contents": [{
                 "role": "user",
-                "parts": [{"text": f"Translate from {resolve_language_name(source_lang)} to {resolve_language_name(target_lang)}:\n{text}"}],
+                "parts": [{"text": f"Translate this subtitle paragraph from {resolve_language_name(source_lang)} to {resolve_language_name(target_lang)}:\n{text}"}],
             }],
             "generationConfig": {
                 "temperature": 0.1,

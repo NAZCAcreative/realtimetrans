@@ -6,13 +6,14 @@ from typing import AsyncGenerator
 from urllib import request, error
 
 from app.providers.base import STTProvider, TranslationProvider, resolve_language_name
+from app.providers.asr_text import apply_asr_glossary, asr_prompt
 
 
 class OpenAIChunkedSTTProvider(STTProvider):
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self.model = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
-        self.prompt = os.getenv("OPENAI_TRANSCRIBE_PROMPT", "You are transcribing audio from a video, live stream, or media player.")
+        self.prompt_override = os.getenv("OPENAI_TRANSCRIBE_PROMPT", "").strip()
         self.language = self._normalize_language(os.getenv("OPENAI_TRANSCRIBE_LANGUAGE", ""))
 
     def _normalize_language(self, language: str | None) -> str | None:
@@ -43,7 +44,7 @@ class OpenAIChunkedSTTProvider(STTProvider):
 
             segment_index += 1
             text = await asyncio.to_thread(self._transcribe_chunk, chunk, segment_index)
-            text = text.strip()
+            text = apply_asr_glossary(text.strip(), self.language)
             if not text:
                 continue
 
@@ -60,7 +61,7 @@ class OpenAIChunkedSTTProvider(STTProvider):
         fields = [
             ("model", self.model),
             ("response_format", "json"),
-            ("prompt", self.prompt),
+            ("prompt", self.prompt_override or asr_prompt(self.language)),
         ]
         if self.language:
             fields.append(("language", self.language))
@@ -122,19 +123,18 @@ class OpenAITranslationProvider(TranslationProvider):
         target_name = resolve_language_name(target_lang)
         source_name = resolve_language_name(source_lang)
         system_content = (
-            f"You are a live interpreter translating speech into {target_name}. "
-            "Render it the way a fluent native speaker would naturally say it in conversation - "
-            "smooth and idiomatic, not word-for-word. Preserve the meaning, tone, register and "
-            "any names, numbers or technical terms. Keep it concise for a subtitle line. "
-            "Use the prior dialogue only to stay consistent (pronouns, dropped subjects, "
-            "terminology); do NOT translate or repeat it. Return ONLY the translation - no quotes, "
-            "labels, or notes."
+            f"You are a senior film subtitle translator for Netflix, Apple TV+, and YouTube Live. Translate speech into {target_name}. "
+            "Prioritize meaning, context, readability, tone, and then literal accuracy. Never produce stiff word-for-word translations. "
+            "Translate short paragraphs as one subtitle unit when possible, preserving intent, register, humor, names, numbers, and technical terms. "
+            "Use the prior dialogue only for consistency of pronouns, omitted subjects, honorifics, formality, and terminology; do not repeat it. "
+            "Format as premium subtitles: natural phrasing, maximum two lines, no three-line output, and line breaks only at semantic boundaries. "
+            "Prefer about 18 to 24 Korean characters per line when translating to Korean. Return ONLY the translated subtitle text, with no labels, quotes, or notes."
         )
         user_content = ""
         if context:
             joined = "\n".join(context)
             user_content += f"Prior dialogue (context, already translated):\n{joined}\n\n"
-        user_content += f"Now translate this {source_name} line into {target_name}:\n{text}"
+        user_content += f"Now translate this {source_name} subtitle paragraph into {target_name}:\n{text}"
 
         payload = {
             "model": self.model,

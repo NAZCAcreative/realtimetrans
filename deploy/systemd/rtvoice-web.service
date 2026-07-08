@@ -1,0 +1,16 @@
+[Unit]
+Description=RTVoice web frontend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/aiproject/realtimetrans/apps/desktop
+Environment=NODE_ENV=production
+Environment=PORT=4000
+ExecStart=/usr/bin/npm run start:renderer
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
