@@ -4,12 +4,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { useSubtitleStore } from "../stores/subtitleStore";
 import {
   Activity,
+  AlertCircle,
   Captions,
   FileText,
   Globe,
   History,
   Languages,
   List,
+  Mic,
   MonitorUp,
   Moon,
   Play,
@@ -18,7 +20,6 @@ import {
   Square,
   Trash2,
   Sun,
-  Tv,
 } from "lucide-react";
 
 const resolveApiHost = () => {
@@ -163,9 +164,9 @@ export default function Dashboard() {
   const visibleSessions = sessions.slice(0, 3);
   const hiddenSessionCount = Math.max(0, sessions.length - visibleSessions.length);
 
-  const [overlayActive, setOverlayActive] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus>("idle");
   const [statusMessage, setStatusMessage] = useState("Ready");
+  const [validationNotice, setValidationNotice] = useState("");
   const [captureMode, setCaptureMode] = useState<SelectedCaptureMode>(null);
   const [backendAvailable, setBackendAvailable] = useState(false);
   const [liveAudioNotice, setLiveAudioNotice] = useState("");
@@ -176,7 +177,9 @@ export default function Dashboard() {
   const [windowCaptureAvailable, setWindowCaptureAvailable] = useState(true);
   const [microphoneCaptureAvailable, setMicrophoneCaptureAvailable] = useState(true);
   const [systemCaptureAvailable, setSystemCaptureAvailable] = useState(true);
-  const [isLightTheme, setIsLightTheme] = useState(false);
+  const [microphoneDevices, setMicrophoneDevices] = useState<{ deviceId: string; label: string }[]>([]);
+  const [selectedMicrophoneDeviceId, setSelectedMicrophoneDeviceId] = useState("default");
+  const [isLightTheme, setIsLightTheme] = useState(true);
 
   // The live Translation shows a short rolling window of recent sentences (older
   // ones dimmed) plus the in-progress one, so it reads as a real-time stream. Stable
@@ -198,6 +201,7 @@ export default function Dashboard() {
   const activeRef = useRef(false);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
+  const validationTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTranscriptFinalAtRef = useRef<number | null>(null);
   const captureModeRef = useRef<CaptureMode>("window");
 
@@ -206,6 +210,25 @@ export default function Dashboard() {
       (window as any).electronAPI.updateSubtitles(data);
     }
   };
+
+  const showValidationNotice = (message: string) => {
+    setValidationNotice(message);
+    if (validationTimerRef.current) {
+      clearTimeout(validationTimerRef.current);
+    }
+    validationTimerRef.current = setTimeout(() => {
+      setValidationNotice("");
+      validationTimerRef.current = null;
+    }, 3600);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (validationTimerRef.current) {
+        clearTimeout(validationTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!finalTranscript || partialTranscript) {
@@ -241,6 +264,53 @@ export default function Dashboard() {
     setWindowCaptureAvailable(isSecure && hasMediaDevices && Boolean(navigator.mediaDevices?.getDisplayMedia));
     setMicrophoneCaptureAvailable(isSecure && hasMediaDevices && Boolean(navigator.mediaDevices?.getUserMedia));
     setSystemCaptureAvailable(hasElectron || isLocalHost);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+
+    let mounted = true;
+
+    const refreshMicrophoneDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputs = devices
+          .filter((device) => device.kind === "audioinput")
+          .map((device, index) => ({
+            deviceId: device.deviceId || `microphone-${index + 1}`,
+            label: device.label || `Microphone ${index + 1}`,
+          }));
+
+        const nextDevices = [
+          { deviceId: "default", label: "System default microphone" },
+          ...audioInputs.filter((device) => device.deviceId !== "default"),
+        ];
+
+        if (!mounted) {
+          return;
+        }
+
+        setMicrophoneDevices(nextDevices);
+        setSelectedMicrophoneDeviceId((current) =>
+          nextDevices.some((device) => device.deviceId === current) ? current : "default"
+        );
+      } catch {
+        if (mounted) {
+          setMicrophoneDevices([{ deviceId: "default", label: "System default microphone" }]);
+          setSelectedMicrophoneDeviceId("default");
+        }
+      }
+    };
+
+    void refreshMicrophoneDevices();
+    navigator.mediaDevices.addEventListener?.("devicechange", refreshMicrophoneDevices);
+
+    return () => {
+      mounted = false;
+      navigator.mediaDevices.removeEventListener?.("devicechange", refreshMicrophoneDevices);
+    };
   }, []);
 
   useEffect(() => {
@@ -561,6 +631,7 @@ export default function Dashboard() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
         setCaptureStatus("error");
         setStatusMessage("Microphone capture requires HTTPS and browser permission.");
+        showValidationNotice("Microphone capture requires HTTPS and browser permission.");
         setLiveAudioNotice("Browser blocked microphone capture on this origin.");
         return;
       }
@@ -568,12 +639,18 @@ export default function Dashboard() {
       setCaptureStatus("selecting");
       setStatusMessage("Allow microphone access to start live translation");
 
+      const microphoneConstraints: MediaTrackConstraints = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      };
+
+      if (selectedMicrophoneDeviceId !== "default") {
+        microphoneConstraints.deviceId = { exact: selectedMicrophoneDeviceId };
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        } as MediaTrackConstraints,
+        audio: microphoneConstraints,
         video: false,
       });
 
@@ -581,6 +658,7 @@ export default function Dashboard() {
         stream.getTracks().forEach((track) => track.stop());
         setCaptureStatus("error");
         setStatusMessage("Microphone did not expose an audio track.");
+        showValidationNotice("No microphone audio track was shared.");
         setLiveAudioNotice("No microphone audio track was shared.");
         return;
       }
@@ -609,7 +687,9 @@ export default function Dashboard() {
       setCapturing(false);
       setConnected(false);
       setCaptureStatus("error");
-      setStatusMessage(error instanceof Error ? error.message : "Microphone capture failed");
+      const message = error instanceof Error ? error.message : "Microphone capture failed";
+      setStatusMessage(message);
+      showValidationNotice(message);
     }
   };
 
@@ -619,6 +699,7 @@ export default function Dashboard() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getDisplayMedia) {
         setCaptureStatus("error");
         setStatusMessage("Tab/Window capture requires HTTPS or localhost. Open this app with https, localhost, or use the desktop app.");
+        showValidationNotice("Tab/Window capture requires HTTPS or localhost.");
         setLiveAudioNotice("Browser blocked screen audio capture on this origin.");
         return;
       }
@@ -644,6 +725,7 @@ export default function Dashboard() {
         stream.getTracks().forEach((track) => track.stop());
         setCaptureStatus("error");
         setStatusMessage("Selected tab/window did not expose audio. Choose a tab with audio sharing enabled, or use Microphone on mobile.");
+        showValidationNotice("No audio track was shared. Enable audio sharing for the selected tab/window.");
         setLiveAudioNotice("No audio track was shared.");
         return;
       }
@@ -672,31 +754,37 @@ export default function Dashboard() {
       setCapturing(false);
       setConnected(false);
       setCaptureStatus("error");
-      setStatusMessage(error instanceof Error ? error.message : "Capture failed");
+      const message = error instanceof Error ? error.message : "Capture failed";
+      setStatusMessage(message);
+      showValidationNotice(message);
     }
   };
 
   const startCapture = async () => {
     if (!captureMode) {
       setCaptureStatus("idle");
-      setStatusMessage("Choose System Audio, Tab / Window, or Microphone first.");
+      setStatusMessage("Choose Tab / Window or Microphone first.");
+      showValidationNotice("Choose Tab / Window or Microphone first.");
       return;
     }
     if (captureMode === "system" && !systemCaptureAvailable) {
       setCaptureStatus("error");
       setStatusMessage("System Audio is not available on the hosted web app. Use Tab / Window or Microphone.");
+      showValidationNotice("Use Tab / Window or Microphone.");
       setLiveAudioNotice("Hosted web cannot capture your computer system audio.");
       return;
     }
     if (captureMode === "window" && !windowCaptureAvailable) {
       setCaptureStatus("error");
       setStatusMessage("Tab/Window capture requires HTTPS or localhost.");
+      showValidationNotice("Tab/Window capture requires HTTPS or localhost.");
       setLiveAudioNotice("Browser blocked tab/window capture on this origin.");
       return;
     }
     if (captureMode === "microphone" && !microphoneCaptureAvailable) {
       setCaptureStatus("error");
       setStatusMessage("Microphone capture requires HTTPS and browser permission.");
+      showValidationNotice("Microphone capture requires HTTPS and browser permission.");
       setLiveAudioNotice("Browser blocked microphone capture on this origin.");
       return;
     }
@@ -761,6 +849,7 @@ export default function Dashboard() {
       setCaptureStatus("error");
       setLiveAudioNotice("System Audio is only available in the desktop app or on the same local machine as the API server.");
       setStatusMessage("Use Tab / Window or Microphone on the hosted web app.");
+      showValidationNotice("Use Tab / Window or Microphone on the hosted web app.");
       setCaptureMode(null);
       return;
     }
@@ -768,6 +857,7 @@ export default function Dashboard() {
       setCaptureStatus("error");
       setLiveAudioNotice("Microphone capture requires HTTPS and browser microphone permission.");
       setStatusMessage("Open the app over HTTPS and allow microphone access.");
+      showValidationNotice("Open the app over HTTPS and allow microphone access.");
       setCaptureMode(null);
       return;
     }
@@ -775,6 +865,7 @@ export default function Dashboard() {
       setCaptureStatus("error");
       setLiveAudioNotice("Browser blocked tab/window capture on this HTTP origin.");
       setStatusMessage("Tab/Window capture requires HTTPS or localhost. Use https://rtvoice.com after TLS is ready, localhost, or the desktop app.");
+      showValidationNotice("Tab/Window capture requires HTTPS or localhost.");
       setCaptureMode(null);
       return;
     }
@@ -800,20 +891,14 @@ export default function Dashboard() {
     }
   };
 
-  const handleToggleOverlay = () => {
-    const hasElectron = typeof window !== "undefined" && (window as any).electronAPI;
-    if (!hasElectron) {
-      // The always-on-top overlay window only exists in the desktop (Electron) app.
-      setStatusMessage("Overlay is only available in the desktop app (run: pnpm dev:desktop). It does nothing in a browser.");
-      return;
-    }
-    const nextState = !overlayActive;
-    setOverlayActive(nextState);
-    (window as any).electronAPI.toggleOverlay(nextState);
-  };
-
   return (
     <div className={isLightTheme ? "theme-light min-h-screen bg-slate-100 text-slate-950" : "min-h-screen bg-darkBg text-gray-100"}>
+      {validationNotice && (
+        <div className="validation-popup fixed left-1/2 top-5 z-50 flex w-[min(calc(100vw-2rem),520px)] -translate-x-1/2 items-start gap-3 rounded-2xl px-4 py-3 text-sm font-medium leading-relaxed shadow-2xl">
+          <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-yellow-400" />
+          <p className="min-w-0 break-words">{validationNotice}</p>
+        </div>
+      )}
       <header className="flex flex-col gap-4 border-b border-white/5 bg-darkBg/90 px-5 py-4 backdrop-blur-xl sm:px-8 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-white text-darkBg shadow-lg shadow-black/30">
@@ -821,11 +906,11 @@ export default function Dashboard() {
           </div>
           <div>
             <h1 className="font-display text-xl font-semibold tracking-normal text-white">LiveSub AI</h1>
-            <p className="text-xs text-gray-500">Cinema-grade live subtitles</p>
+            <p className="text-sm text-gray-500">Cinema-grade live subtitles</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => setIsLightTheme(!isLightTheme)}
@@ -836,7 +921,7 @@ export default function Dashboard() {
             {isLightTheme ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
             {isLightTheme ? "Dark" : "White"}
           </button>
-          <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 font-mono text-[11px] font-semibold text-gray-400">{APP_BUILD_VERSION}</div>
+          <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 font-mono text-xs font-semibold text-gray-400">{APP_BUILD_VERSION}</div>
           <div className="chip chip-success">
             <span className={`h-2 w-2 rounded-full ${isConnected || backendAvailable ? "bg-accentGreen" : "bg-red-500"}`} />
             <span className="text-gray-400">Server</span>
@@ -856,12 +941,12 @@ export default function Dashboard() {
       <main className="grid min-h-[calc(100vh-74px)] grid-cols-1 gap-6 p-5 sm:p-7 xl:grid-cols-[260px_minmax(0,1fr)_220px] 2xl:grid-cols-[280px_minmax(0,1fr)_240px]">
         <section className="flex min-h-0 flex-col gap-5 xl:overflow-y-auto xl:pr-1">
           <div className="panel-shell flex flex-col gap-4 p-4">
-            <h2 className="font-display flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">
+            <h2 className="font-display flex items-center gap-2 text-lg font-semibold uppercase tracking-[0.08em] text-gray-400">
               <Sliders className="h-4 w-4" /> ENGINE
             </h2>
 
             <div className="flex flex-col gap-2">
-              <label className="text-xs font-medium text-gray-400">STT Provider</label>
+              <label className="text-sm font-medium text-gray-500">STT Provider</label>
               <select
                 disabled={isCapturing}
                 value={sttProvider}
@@ -875,7 +960,7 @@ export default function Dashboard() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <label className="text-xs font-medium text-gray-400">Translation Provider</label>
+              <label className="text-sm font-medium text-gray-500">Translation Provider</label>
               <select
                 disabled={isCapturing}
                 value={translationProvider}
@@ -889,22 +974,8 @@ export default function Dashboard() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <label className="text-xs font-medium text-gray-400">Capture Mode</label>
-              <div className="grid grid-cols-3 gap-2">
-                <button
-                  type="button"
-                  disabled={isCapturing || !systemCaptureAvailable}
-                  title={!systemCaptureAvailable ? "Hosted web cannot capture your computer system audio. Use Tab / Window or Microphone." : undefined}
-                  aria-pressed={captureMode === "system"}
-                  onClick={() => void handleSelectCaptureMode("system")}
-                  className={`capture-mode-button ${
-                    captureMode === "system"
-                      ? "border-white/20 bg-white/10 text-white"
-                      : "border-white/[0.08] bg-white/[0.03] text-gray-400 hover:border-white/20 hover:text-gray-200"
-                  }`}
-                >
-                  System Audio
-                </button>
+              <label className="text-sm font-medium text-gray-500">Capture Mode</label>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                 <button
                   type="button"
                   disabled={isCapturing || !windowCaptureAvailable}
@@ -936,9 +1007,27 @@ export default function Dashboard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-2">
+              <label className="flex items-center gap-1 text-sm font-medium text-gray-500">
+                <Mic className="h-3 w-3 text-accentPurple" /> Microphone Input
+              </label>
+              <select
+                disabled={isCapturing || !microphoneCaptureAvailable}
+                value={selectedMicrophoneDeviceId}
+                onChange={(e) => setSelectedMicrophoneDeviceId(e.target.value)}
+                className="control-select"
+              >
+                {(microphoneDevices.length > 0 ? microphoneDevices : [{ deviceId: "default", label: "System default microphone" }]).map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="flex flex-col gap-2">
-                <label className="flex items-center gap-1 text-xs font-medium text-gray-400">
+                <label className="flex items-center gap-1 text-sm font-medium text-gray-500">
                   <Globe className="h-3 w-3 text-accentBlue" /> Source
                 </label>
                 <select
@@ -955,7 +1044,7 @@ export default function Dashboard() {
               </div>
 
               <div className="flex flex-col gap-2">
-                <label className="flex items-center gap-1 text-xs font-medium text-gray-400">
+                <label className="flex items-center gap-1 text-sm font-medium text-gray-500">
                   <Languages className="h-3 w-3 text-accentPurple" /> Target
                 </label>
                 <select
@@ -972,7 +1061,7 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center justify-between border-t border-darkBorder/50 pt-4">
-              <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400">
+              <label className="flex items-center gap-1.5 text-sm font-medium text-gray-500">
                 <RotateCcw className="h-3 w-3 text-accentBlue" /> Reset log on new capture
               </label>
               <button
@@ -1000,75 +1089,62 @@ export default function Dashboard() {
               {isCapturing ? <Square className="h-5 w-5 fill-current" /> : <Play className="h-5 w-5 fill-current" />}
               {isCapturing
                 ? "Stop Captions"
-                : captureMode === "system"
-                  ? "Capture System Audio"
-                  : captureMode === "window"
-                    ? "Select Window/Tab Audio"
-                    : captureMode === "microphone"
-                      ? "Capture Microphone"
-                      : "Select Capture Mode"}
+                : captureMode === "window"
+                  ? "Select Window/Tab Audio"
+                  : captureMode === "microphone"
+                    ? "Capture Microphone"
+                    : "Select Capture Mode"}
             </button>
 
-            <button
-              onClick={handleToggleOverlay}
-              className={`flex w-full items-center justify-center gap-2 rounded-2xl border px-5 py-3.5 text-sm font-medium transition ${
-                overlayActive
-                  ? "border-accentPurple/50 bg-accentPurple/15 text-purple-100"
-                  : "border-white/10 bg-white/[0.04] text-gray-300 hover:bg-white/[0.08]"
-              }`}
-            >
-              <Tv className="h-4 w-4" />
-              {overlayActive ? "Hide Overlay" : "Show Overlay"}
-            </button>
           </div>
 
           <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4 text-sm text-gray-300">
-            <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-500">
-              <MonitorUp className="h-3.5 w-3.5" /> Capture Status
+            <div className="mb-2 flex items-center gap-2 text-base font-semibold uppercase tracking-wide text-gray-500">
+              <MonitorUp className="h-4 w-4" /> Capture Status
             </div>
             <p className={captureStatus === "error" ? "text-red-300" : "text-gray-300"}>{statusMessage}</p>
           </div>
         </section>
 
-        <section className="flex min-h-0 flex-col gap-6">
-          <div className="cinema-stage relative flex min-h-[430px] flex-[1.15] flex-col overflow-hidden rounded-[28px] p-7 sm:p-9 xl:min-h-[520px]">
+        <section className="grid min-h-0 grid-cols-1 gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] 2xl:items-stretch">
+          <div className="cinema-stage relative flex min-h-[460px] flex-none flex-col overflow-hidden rounded-[28px] p-6 sm:p-7 xl:min-h-[560px] 2xl:h-full 2xl:min-h-0">
             <div className="mb-5 flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-gray-400">
+              <div className="live-output-label flex items-center gap-2 text-base font-semibold uppercase tracking-[0.10em]">
                 <Activity className="h-3.5 w-3.5" /> Live Output
               </div>
               {isCapturing ? (
-                <span className="flex items-center gap-1.5 rounded-full bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-red-400">
+                <span className="live-status-pill live-status-on flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold tracking-wide">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> LIVE
                 </span>
               ) : (
-                <span className="flex items-center gap-1.5 rounded-full bg-darkCard px-2.5 py-1 text-[11px] font-semibold tracking-wide text-gray-500">
+                <span className="live-status-pill flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold tracking-wide">
                   <span className="h-1.5 w-1.5 rounded-full bg-gray-600" /> IDLE
                 </span>
               )}
             </div>
 
-            <div className="z-10 grid flex-1 select-text grid-rows-[auto_minmax(0,1fr)] gap-5">
-              <div className="flex flex-col justify-start rounded-3xl border border-white/[0.08] bg-black/20 px-5 py-4">
-                <p className="font-display mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-gray-500">
+            <div className="z-10 flex flex-1 select-text flex-col gap-2">
+              <div className="original-surface flex flex-1 flex-col justify-end rounded-[24px] px-5 py-5 md:px-6">
+                <p className="original-label font-display mb-2 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.12em]">
                   <span className="h-1 w-1 rounded-full bg-accentBlue" /> Original
                 </p>
-                <p className="max-h-[8rem] min-h-[3.5rem] overflow-hidden whitespace-pre-wrap break-words font-sans text-lg font-medium leading-relaxed text-gray-400 md:text-xl">
+                <p className="original-text min-h-[6rem] overflow-hidden whitespace-pre-wrap break-keep font-display text-2xl font-semibold leading-snug md:min-h-[8rem] md:text-4xl">
                   {finalTranscript || partialTranscript ? (
                     <>
                       <span>{tailText(finalTranscript, 520)}</span>
                       {partialTranscript && <span className="ml-2 animate-pulse text-gray-300">{tailText(partialTranscript, 700)}...</span>}
                     </>
                   ) : (
-                    <span className="italic text-gray-600">Source transcript appears here.</span>
+                    <span className="original-placeholder italic">Source transcript appears here.</span>
                   )}
                 </p>
               </div>
 
-              <div className="subtitle-surface flex flex-col justify-end rounded-[28px] px-7 py-7 shadow-2xl">
-                <p className="font-display mb-4 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-accentPurple">
+              <div className="subtitle-surface flex flex-1 flex-col justify-end rounded-[24px] px-5 py-5 shadow-2xl md:px-6">
+                <p className="subtitle-label font-display mb-3 flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.12em]">
                   <span className="h-1 w-1 rounded-full bg-accentPurple" /> Translation
                 </p>
-                <div className="font-display flex min-h-[8.5rem] flex-col justify-end gap-2 leading-tight">
+                <div className="font-display flex min-h-[6rem] flex-col justify-end gap-1.5 leading-snug md:min-h-[8rem]">
                   {translationLines.length > 0 ? (
                     translationLines.map((line, i) => {
                       const isCurrent = i === translationLines.length - 1;
@@ -1078,8 +1154,8 @@ export default function Dashboard() {
                           className={
                             "animate-line-in break-keep whitespace-pre-wrap " +
                             (isCurrent
-                              ? `subtitle-live text-3xl font-semibold md:text-5xl ${line.isPartial ? "text-purple-100/90" : "text-white"}`
-                              : "text-xl font-medium text-gray-500/60 md:text-2xl")
+                              ? `subtitle-live text-2xl font-semibold leading-snug md:text-4xl ${line.isPartial ? "text-purple-100/90" : "text-white"}`
+                              : "text-lg font-medium leading-snug text-gray-500/60 md:text-xl")
                           }
                         >
                           {tailText(line.text, 220)}
@@ -1088,23 +1164,23 @@ export default function Dashboard() {
                       );
                     })
                   ) : liveAudioNotice ? (
-                    <p className="text-xl font-medium text-gray-400 md:text-2xl">{liveAudioNotice}</p>
+                    <p className="subtitle-placeholder text-lg font-medium leading-snug md:text-xl">{liveAudioNotice}</p>
                   ) : isCapturing ? (
-                    <p className="text-xl font-medium italic text-gray-600 md:text-2xl">Waiting for speech...</p>
+                    <p className="subtitle-placeholder text-lg font-medium leading-snug italic md:text-xl">Waiting for speech...</p>
                   ) : (
-                    <p className="text-xl font-medium italic text-gray-600 md:text-2xl">No active capture.</p>
+                    <p className="subtitle-placeholder text-lg font-medium leading-snug italic md:text-xl">No active capture.</p>
                   )}
                 </div>
               </div>
             </div>
           </div>
 
-          <div className="panel-shell flex min-h-[360px] flex-[0.85] flex-col gap-4 p-5 xl:min-h-0">
-            <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
-              <h3 className="font-display flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">
-                <History className="h-4 w-4 text-accentBlue" /> CAPTION LOG
+          <div className="panel-shell caption-chat-panel flex min-h-[320px] flex-1 flex-col gap-4 p-5 xl:min-h-0 2xl:h-full 2xl:min-h-0 2xl:max-h-[calc(100vh-128px)]">
+            <div className="caption-log-header flex items-center justify-between border-b pb-3">
+              <h3 className="font-display flex items-center gap-2 text-lg font-semibold uppercase tracking-[0.08em] text-gray-400">
+                <History className="h-5 w-5 text-accentBlue" /> CAPTION LOG
                 {selectedSession && (
-                  <span className="ml-1 truncate rounded-full bg-darkBorder/60 px-2 py-0.5 text-[10px] font-medium text-gray-400">
+                  <span className="ml-1 truncate rounded-full bg-darkBorder/60 px-2 py-0.5 text-sm font-medium text-gray-500">
                     {selectedSession.label} - {sessionItems.length}
                   </span>
                 )}
@@ -1112,19 +1188,19 @@ export default function Dashboard() {
               <button
                 onClick={clearHistory}
                 disabled={sessions.length === 0}
-                className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-red-400 disabled:opacity-50"
+                className="flex min-h-[32px] items-center gap-1 text-sm text-gray-500 transition hover:text-red-400 disabled:opacity-50"
               >
                 <Trash2 className="h-3.5 w-3.5" /> Clear all
               </button>
             </div>
 
-            <div className="flex gap-1 rounded-2xl bg-black/20 p-1 text-xs">
+            <div className="caption-tabs flex gap-1 rounded-2xl p-1.5 text-base">
               {([["both", "Both"], ["original", "Original"], ["translation", "Translation"]] as const).map(([v, label]) => (
                 <button
                   key={v}
                   onClick={() => setLogView(v)}
-                  className={`flex-1 rounded-md px-3 py-1.5 font-medium transition ${
-                    logView === v ? "bg-white/10 text-white" : "text-gray-500 hover:text-gray-300"
+                  className={`caption-tab flex-1 rounded-xl px-4 py-2.5 font-semibold transition ${
+                    logView === v ? "caption-tab-active" : "caption-tab-idle"
                   }`}
                 >
                   {label}
@@ -1137,24 +1213,28 @@ export default function Dashboard() {
                 sessionItems.map((item) => (
                   <article
                     key={item.id}
-                    className="script-card animate-fade-in mx-auto w-full max-w-4xl p-4"
+                    className="script-card animate-fade-in w-full p-4 md:p-5"
                   >
-                    <div className="mb-3 flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em] text-gray-600">
-                      <FileText className="h-3 w-3" />
-                      <time>{new Date(item.timestamp).toLocaleTimeString()}</time>
+                    <div className="script-card-layout">
+                      <div className="script-time flex items-center gap-1.5 text-base uppercase tracking-[0.08em]">
+                        <FileText className="h-4 w-4" />
+                        <time>{new Date(item.timestamp).toLocaleTimeString()}</time>
+                      </div>
+                      <div className="min-w-0">
+                        {logView !== "translation" && (
+                          <p className="script-source font-sans text-xl font-medium leading-relaxed">{item.sourceText}</p>
+                        )}
+                        {logView !== "original" && (
+                          <p className={`script-translation font-display text-xl font-semibold leading-relaxed ${logView === "both" ? "mt-2" : ""}`}>
+                            {item.translatedText}
+                          </p>
+                        )}
+                      </div>
                     </div>
-                    {logView !== "translation" && (
-                      <p className="font-sans text-base leading-relaxed text-gray-400">{item.sourceText}</p>
-                    )}
-                    {logView !== "original" && (
-                      <p className={`font-display text-xl font-semibold leading-relaxed text-white ${logView === "both" ? "mt-2" : ""}`}>
-                        {item.translatedText}
-                      </p>
-                    )}
                   </article>
                 ))
               ) : (
-                <div className="flex flex-1 items-center justify-center py-8 text-xs text-gray-600">No captions yet.</div>
+                <div className="flex flex-1 items-center justify-center py-8 text-sm text-gray-600">No captions yet.</div>
               )}
             </div>
           </div>
@@ -1162,16 +1242,16 @@ export default function Dashboard() {
 
         <section className="flex min-h-0 flex-col gap-5">
           <div className="panel-shell flex max-h-[420px] flex-col gap-3 p-4 xl:max-h-none">
-            <div className="flex items-center gap-2 border-b border-white/[0.08] pb-3 font-display text-xs font-semibold uppercase tracking-[0.16em] text-gray-400">
-              <List className="h-4 w-4 text-accentPurple" /> SESSIONS
+            <div className="flex flex-wrap items-center gap-2 border-b border-white/[0.08] pb-3 font-display text-lg font-semibold uppercase tracking-[0.08em] text-gray-400">
+              <List className="h-5 w-5 text-accentPurple" /> SESSIONS
               {sessions.length > 0 && (
-                <span className="rounded-full bg-darkBorder/60 px-2 py-0.5 text-[10px] font-medium text-gray-500">{sessions.length}</span>
+                <span className="rounded-full bg-darkBorder/60 px-2 py-0.5 text-xs font-medium text-gray-500">{sessions.length}</span>
               )}
               <button
                 onClick={clearHistory}
                 disabled={sessions.length === 0 || isCapturing}
                 title="Clear all sessions"
-                className="ml-auto flex items-center gap-1 text-xs font-normal text-gray-500 transition hover:text-red-400 disabled:opacity-40"
+                className="ml-auto flex min-h-[32px] items-center gap-1 text-sm font-normal text-gray-500 transition hover:text-red-400 disabled:opacity-40"
               >
                 <Trash2 className="h-3.5 w-3.5" /> Clear
               </button>
@@ -1192,27 +1272,27 @@ export default function Dashboard() {
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate font-display text-xs font-semibold text-gray-200">{s.label}</span>
+                        <span className="font-display text-sm font-semibold leading-snug text-gray-200">{s.label}</span>
                         {isActive && (
-                          <span className="flex shrink-0 items-center gap-1 text-[9px] font-semibold text-red-400">
+                          <span className="flex shrink-0 items-center gap-1 text-xs font-semibold text-red-400">
                             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" /> LIVE
                           </span>
                         )}
                       </div>
-                      <span className="text-[11px] text-gray-500">{s.items.length} captions</span>
+                      <span className="text-sm text-gray-500">{s.items.length} captions</span>
                       {s.items[0] && (
-                        <span className="truncate text-[11px] text-purple-300/80">{s.items[0].translatedText}</span>
+                        <span className="text-xs leading-snug text-purple-300/80">{s.items[0].translatedText}</span>
                       )}
                     </button>
                   );
                 })
               ) : (
-                <div className="flex flex-1 items-center justify-center px-2 py-8 text-center text-xs leading-relaxed text-gray-600">
+                <div className="flex flex-1 items-center justify-center px-2 py-8 text-center text-sm leading-relaxed text-gray-600">
                   Press play to start a capture session.
                 </div>
               )}
               {hiddenSessionCount > 0 && (
-                <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-center text-xs text-gray-500">
+                <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-center text-sm text-gray-500">
                   +{hiddenSessionCount} older sessions folded
                 </div>
               )}

@@ -5,6 +5,11 @@
 @layer base {
   body {
     @apply bg-darkBg text-gray-100 overflow-x-hidden font-sans;
+    font-feature-settings: "kern" 1;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: 0;
   }
 }
 
@@ -88,7 +93,7 @@
   }
 
   .chip {
-    @apply flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium;
+    @apply inline-flex min-h-[36px] items-center gap-2 rounded-full border px-3.5 py-2 text-sm font-medium leading-snug;
   }
 
   .chip-success {
@@ -104,11 +109,11 @@
   }
 
   .control-select {
-    @apply w-full rounded-2xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm text-gray-200 outline-none transition focus:border-accentPurple disabled:opacity-50;
+    @apply min-h-[46px] w-full rounded-2xl border border-white/10 bg-black/25 px-3.5 py-3 text-sm font-medium leading-snug text-gray-200 outline-none transition focus:border-accentPurple disabled:opacity-50;
   }
 
   .capture-mode-button {
-    @apply min-h-[52px] rounded-2xl border px-2.5 py-2 text-xs font-medium leading-tight transition disabled:opacity-50;
+    @apply min-h-[64px] whitespace-normal break-keep rounded-2xl border px-3 py-2.5 text-sm font-medium leading-snug transition disabled:opacity-50;
   }
 
   .cinema-stage {
@@ -119,9 +124,49 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 28px 70px rgba(0, 0, 0, 0.35);
   }
 
+
+  .live-output-label {
+    color: rgb(156 163 175);
+  }
+
+  .live-status-pill {
+    background: rgba(17, 19, 28, 0.86);
+    color: rgb(107 114 128);
+  }
+
+  .live-status-on {
+    background: rgba(239, 68, 68, 0.10);
+    color: rgb(248 113 113);
+  }
+
+  .original-surface {
+    background: rgba(0, 0, 0, 0.20);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .original-label {
+    color: rgb(107 114 128);
+  }
+
+  .original-text {
+    color: rgb(156 163 175);
+  }
+
+  .original-placeholder {
+    color: rgb(75 85 99);
+  }
+
   .subtitle-surface {
     background: linear-gradient(180deg, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0.72));
     border: 1px solid rgba(255, 255, 255, 0.10);
+  }
+
+  .subtitle-label {
+    color: rgb(196 181 253);
+  }
+
+  .subtitle-placeholder {
+    color: rgb(75 85 99);
   }
 
   .subtitle-live {
@@ -133,6 +178,93 @@
   .script-card {
     @apply rounded-2xl border border-white/[0.08] bg-black/20 shadow-lg shadow-black/10;
   }
+
+  .script-card-layout {
+    display: grid;
+    grid-template-columns: minmax(112px, 140px) minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+
+  .script-time {
+    color: rgb(75 85 99);
+    padding-top: 0.3rem;
+  }
+
+  .script-source {
+    color: rgb(156 163 175);
+  }
+
+  .script-translation {
+    color: white;
+  }
+
+  .caption-log-header {
+    border-color: rgba(255, 255, 255, 0.10);
+  }
+
+  .caption-tabs {
+    background: rgba(0, 0, 0, 0.24);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .caption-tab {
+    min-height: 38px;
+    color: rgb(156 163 175);
+  }
+
+  .caption-tab-idle:hover {
+    color: rgb(229 231 235);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .caption-tab-active {
+    background: rgba(255, 255, 255, 0.12);
+    color: white;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  }
+
+  @media (max-width: 767px) {
+    .script-card-layout {
+      display: block;
+    }
+
+    .script-time {
+      margin-bottom: 0.75rem;
+      padding-top: 0;
+    }
+  }
+  @media (min-width: 1536px) {
+    .caption-chat-panel {
+      border-radius: 28px;
+    }
+
+    .caption-chat-panel .caption-log-header {
+      align-items: flex-start;
+      gap: 0.75rem;
+    }
+
+    .caption-chat-panel .script-card {
+      border-radius: 20px;
+      padding: 1rem;
+    }
+
+    .caption-chat-panel .script-card-layout {
+      display: block;
+    }
+
+    .caption-chat-panel .script-time {
+      margin-bottom: 0.75rem;
+      padding-top: 0;
+      font-size: 1rem;
+    }
+
+    .caption-chat-panel .script-source,
+    .caption-chat-panel .script-translation {
+      font-size: 1.25rem;
+      line-height: 1.55;
+    }
+  }
 }
 
 
@@ -143,8 +275,8 @@
   border-radius: 9999px;
   border: 1px solid rgba(255, 255, 255, 0.10);
   background: rgba(255, 255, 255, 0.055);
-  padding: 0.375rem 0.75rem;
-  font-size: 11px;
+  padding: 0.5rem 0.85rem;
+  font-size: 13px;
   font-weight: 700;
   color: rgb(209 213 219);
   transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
@@ -154,6 +286,19 @@
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.09);
   color: white;
+}
+
+.validation-popup {
+  border: 1px solid rgba(250, 204, 21, 0.32);
+  background: rgba(15, 23, 42, 0.96);
+  color: white;
+}
+
+.theme-light .validation-popup {
+  border-color: rgba(202, 138, 4, 0.28);
+  background: rgba(255, 255, 255, 0.98);
+  color: rgb(15 23 42);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.16);
 }
 
 .theme-light header {
@@ -184,8 +329,13 @@
 }
 
 .theme-light .subtitle-surface {
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.96));
-  border-color: rgba(15, 23, 42, 0.22);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(241, 245, 249, 0.92));
+  border-color: rgba(15, 23, 42, 0.10);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.08);
+}
+
+.theme-light .subtitle-live {
+  text-shadow: none;
 }
 
 .theme-light .script-card {
@@ -219,17 +369,220 @@
   color: rgb(100 116 139);
 }
 
-.theme-light .subtitle-surface .text-white,
-.theme-light .subtitle-surface .text-gray-400,
-.theme-light .subtitle-surface .text-gray-500,
-.theme-light .subtitle-surface .text-gray-600,
-.theme-light .subtitle-surface .text-purple-100\/90 {
-  color: white;
-}
-
 .theme-light .bg-darkCard,
 .theme-light .bg-darkCard\/60,
 .theme-light .bg-darkBorder\/60,
 .theme-light .bg-black\/20 {
   background-color: rgba(255, 255, 255, 0.62);
+}
+
+.theme-light .subtitle-surface .text-gray-500\/60 {
+  color: rgba(51, 65, 85, 0.55);
+}
+
+.theme-light .subtitle-surface .text-purple-100\/90 {
+  color: rgba(124, 58, 237, 0.85);
+}
+
+.theme-light .subtitle-label {
+  color: rgb(109 40 217);
+}
+
+.theme-light .subtitle-placeholder {
+  color: rgb(100 116 139);
+}
+
+.theme-light .subtitle-surface .subtitle-live.text-white {
+  color: rgb(15 23 42);
+}
+
+.theme-light .live-output-label {
+  color: rgb(71 85 105);
+}
+
+.theme-light .live-status-pill {
+  background: rgba(255, 255, 255, 0.90);
+  border: 1px solid rgba(15, 23, 42, 0.10);
+  color: rgb(71 85 105);
+}
+
+.theme-light .live-status-on {
+  background: rgba(254, 242, 242, 0.92);
+  border-color: rgba(239, 68, 68, 0.18);
+  color: rgb(185 28 28);
+}
+
+.theme-light .original-surface {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.06);
+}
+
+.theme-light .original-label {
+  color: rgb(71 85 105);
+}
+
+.theme-light .original-text {
+  color: rgb(30 41 59);
+}
+
+.theme-light .original-placeholder {
+  color: rgb(100 116 139);
+}
+
+.theme-light .subtitle-surface {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  border-color: rgba(15, 23, 42, 0.14);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.10);
+}
+
+.theme-light .subtitle-label {
+  color: rgb(91 33 182);
+}
+
+.theme-light .subtitle-placeholder {
+  color: rgb(71 85 105);
+}
+
+.theme-light .script-time {
+  color: rgb(100 116 139);
+}
+
+.theme-light .script-source {
+  color: rgb(71 85 105);
+}
+
+.theme-light .script-translation {
+  color: rgb(15 23 42);
+}
+
+.theme-light .caption-log-header {
+  border-color: rgba(15, 23, 42, 0.12);
+}
+
+.theme-light .caption-tabs {
+  background: rgba(226, 232, 240, 0.62);
+  border-color: rgba(15, 23, 42, 0.10);
+}
+
+.theme-light .caption-tab {
+  color: rgb(71 85 105);
+}
+
+.theme-light .caption-tab-idle:hover {
+  background: rgba(255, 255, 255, 0.62);
+  color: rgb(15 23 42);
+}
+
+.theme-light .caption-tab-active {
+  background: rgba(255, 255, 255, 0.96);
+  color: rgb(15 23 42);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.10);
+}
+
+
+/* Readability pass: make the default white mode feel like a clean typography surface. */
+.theme-light {
+  background:
+    radial-gradient(circle at 50% -10%, rgba(124, 58, 237, 0.07), transparent 30%),
+    linear-gradient(180deg, rgb(248, 250, 252), rgb(241, 245, 249));
+  color: rgb(15 23 42);
+}
+
+.theme-light .font-display,
+.theme-light .font-sans {
+  letter-spacing: 0;
+}
+
+.theme-light h1,
+.theme-light h2,
+.theme-light h3 {
+  color: rgb(15 23 42);
+}
+
+.theme-light .cinema-stage {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(124, 58, 237, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.09);
+}
+
+.theme-light .original-text,
+.theme-light .script-source {
+  font-weight: 500;
+  line-height: 1.7;
+}
+
+.theme-light .script-translation {
+  font-weight: 650;
+  line-height: 1.55;
+}
+
+.theme-light .subtitle-live {
+  color: rgb(15 23 42);
+  font-weight: 700;
+  line-height: 1.18;
+}
+
+.theme-light .subtitle-surface .text-gray-500\/60 {
+  color: rgba(51, 65, 85, 0.68);
+}
+
+.theme-light .control-select,
+.theme-light .capture-mode-button {
+  font-weight: 500;
+}
+
+
+.cinema-stage,
+.panel-shell,
+.script-card,
+.caption-tabs {
+  font-size: 14px;
+}
+
+/* Minimum readable UI text floor: avoid sub-12px chrome labels. */
+.theme-light label,
+.theme-light button,
+.theme-light select,
+.theme-light .chip,
+.theme-light .theme-toggle {
+  font-size: max(12px, 1em);
+}
+
+
+/* Let controls grow when translated or long labels wrap. */
+button,
+.chip,
+.theme-toggle,
+.capture-mode-button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+select.control-select {
+  white-space: normal;
+  text-overflow: clip;
+}
+
+.panel-shell,
+.cinema-stage,
+.script-card,
+.original-surface,
+.subtitle-surface {
+  overflow-wrap: anywhere;
+}
+
+.script-card {
+  min-height: fit-content;
+}
+
+.script-translation,
+.script-source,
+.original-text,
+.subtitle-live,
+.subtitle-placeholder {
+  overflow-wrap: anywhere;
+  word-break: keep-all;
 }

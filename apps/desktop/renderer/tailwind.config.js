@@ -16,8 +16,8 @@ module.exports = {
         glassBg: "rgba(17, 19, 28, 0.75)",
       },
       fontFamily: {
-        sans: ["Inter", "sans-serif"],
-        display: ["Outfit", "sans-serif"],
+        sans: ["Pretendard", "Inter", "-apple-system", "BlinkMacSystemFont", "Apple SD Gothic Neo", "Segoe UI", "sans-serif"],
+        display: ["Pretendard", "Inter", "-apple-system", "BlinkMacSystemFont", "Apple SD Gothic Neo", "Segoe UI", "sans-serif"],
       },
     },
   },
